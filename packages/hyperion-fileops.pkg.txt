@@ -1,0 +1,95 @@
+return {
+  allowKernel = true,
+  depends = {
+  },
+  description = "Filesystem helper syscalls and home-directory compatibility fixes.",
+  files = {
+    {
+      checksum = "sha256:d7679ecd69ab5223781079fd830d29ae81f506fca351ec57d95328112dc44eb8:1074",
+      path = "/lib/modules/hyperion/56_fileops.kmod",
+      text = "local kernel = ...\
+local sys = kernel.syscalls\
+\
+local function cleanError(err)\
+    err = tostring(err or \"unknown error\")\
+    return err:match(\"^([^\\n]+)\") or err\
+end\
+\
+local function result(fn)\
+    local ok, value = pcall(fn)\
+    if ok then\
+        return true, value\
+    end\
+    return false, cleanError(value)\
+end\
+\
+sys[\"fs_create\"] = function(path, kind)\
+    path = tostring(path or \"\")\
+    kind = tostring(kind or \"file\")\
+    if path == \"\" then\
+        return false, \"EINVAL: empty path\"\
+    end\
+\
+    if kind == \"directory\" then\
+        if path:sub(-1) ~= \"/\" then\
+            path = path .. \"/\"\
+        end\
+        return result(function()\
+            kernel.vfs.mkdir(path)\
+        end)\
+    elseif kind == \"file\" then\
+        return result(function()\
+            local fd = kernel.vfs.open(path, \"w\")\
+            if fd ~= nil then\
+                pcall(kernel.vfs.write, fd, \"\")\
+                kernel.vfs.close(fd)\
+            end\
+        end)\
+    end\
+\
+    return false, \"EINVAL: unknown create kind\"\
+end\
+\
+kernel.log(\"File operations module loaded\", \"INFO\", 0x00FFFF)\
+",
+    },
+    {
+      checksum = "sha256:87e97d548ad2d3ec43a1d9564b709b9c964ca5d8298e1b89b1334da80eec5d1f:880",
+      path = "/lib/modules/hyperion/57_homefix.kmod",
+      text = "local kernel = ...\
+\
+local oldUid = kernel.uid\
+kernel.uid = 0\
+\
+local fixed = 0\
+for _, entry in ipairs(kernel.passwd or {}) do\
+    local uid = tonumber(entry[1])\
+    local gid = tonumber(entry[2]) or uid\
+    local home = entry[4]\
+    if uid and uid ~= 0 and type(home) == \"string\" and home:sub(1, 1) == \"/\" and home ~= \"/\" then\
+        local okExists, exists = pcall(kernel.vfs.exists, home)\
+        if not okExists or not exists then\
+            pcall(kernel.vfs.mkdir, home)\
+        end\
+        okExists, exists = pcall(kernel.vfs.exists, home)\
+        if exists then\
+            local ok = pcall(kernel.vfs.chown, home, uid, gid)\
+            if ok then\
+                fixed = fixed + 1\
+            end\
+        end\
+    end\
+end\
+\
+kernel.uid = oldUid\
+\
+if fixed > 0 then\
+    kernel.log(\"Home directory ownership repaired for \" .. tostring(fixed) .. \" user(s)\", \"INFO\", 0x00FFFF)\
+end\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-fileops",
+  version = "0.1.0",
+}

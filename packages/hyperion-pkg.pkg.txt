@@ -1,0 +1,1559 @@
+return {
+  depends = {
+    "hyperion-crypto",
+  },
+  description = "Secure package manager with local and remote repository support.",
+  dirs = {
+    "/etc/pkg",
+    "/var/cache/pkg",
+    "/var/cache/pkg/repos",
+    "/var/db/pkg",
+  },
+  files = {
+    {
+      checksum = "sha256:f89fd8bf2c84b0ff0ba59f22fe31597bf2d5d83196cf351e27ed8a6c69ec8d68:6161",
+      mode = 954,
+      path = "/bin/pkg",
+      text = "local pkg = require(\"pkg\")\
+\
+local args = { ... }\
+local cmd = args[1]\
+\
+local function out(text)\
+    print(tostring(text or \"\"))\
+end\
+\
+local function die(text)\
+    print(\"pkg: \" .. tostring(text or \"unknown error\"))\
+    syscall.exit(1)\
+end\
+\
+local function usage()\
+    out(\"Usage: pkg <command> [args]\")\
+    out(\"\")\
+    out(\"Commands:\")\
+    out(\"  init                         create pkg db/config dirs\")\
+    out(\"  add-repo <path> [name]       trust and add a local repo\")\
+    out(\"  add-remote <name> <url> <key> trust and add an HTTP repo\")\
+    out(\"  sync [repo...]               fetch and verify remote repo indexes\")\
+    out(\"  index <repo-dir> [index]     validate repo packages and write index\")\
+    out(\"  sign-index <repo-dir> <key>  write index.hmac for a repo\")\
+    out(\"  audit <manifest.pkg.lua>     validate one package manifest\")\
+    out(\"  checksum <text>              print payload checksum\")\
+    out(\"  search [query]               search trusted repos\")\
+    out(\"  info <name>                  show repo package info\")\
+    out(\"  install [-n] <pkg...>        install packages (-n dry run)\")\
+    out(\"  remove [-n] [-f] <pkg...>    remove packages\")\
+    out(\"  list                         list installed packages\")\
+    out(\"  files <pkg>                  list installed package files\")\
+    out(\"  check [pkg]                  verify installed files\")\
+    out(\"\")\
+    out(\"Package manifests are Lua tables named *.pkg.lua.\")\
+end\
+\
+local function shift(list)\
+    local first = list[1]\
+    table.remove(list, 1)\
+    return first\
+end\
+\
+local function parseFlags(list)\
+    local flags = {}\
+    local rest = {}\
+    for _, arg in ipairs(list) do\
+        if arg == \"-n\" or arg == \"--dry-run\" then\
+            flags.dryRun = true\
+        elseif arg == \"-f\" or arg == \"--force\" then\
+            flags.force = true\
+        else\
+            rest[#rest + 1] = arg\
+        end\
+    end\
+    return flags, rest\
+end\
+\
+if not cmd or cmd == \"help\" or cmd == \"--help\" or cmd == \"-h\" then\
+    usage()\
+    return\
+end\
+\
+shift(args)\
+\
+if cmd == \"init\" then\
+    local ok, why = pkg.init()\
+    if not ok then\
+        die(why)\
+    end\
+    out(\"pkg: initialized\")\
+elseif cmd == \"add-repo\" then\
+    local path = args[1]\
+    if not path then\
+        die(\"missing repo path\")\
+    end\
+    local ok, why = pkg.addRepo(path, args[2])\
+    if not ok then\
+        die(why)\
+    end\
+    out(\"pkg: added repo \" .. path)\
+elseif cmd == \"add-remote\" then\
+    local name, url, key = args[1], args[2], args[3]\
+    if not name or not url or not key then\
+        die(\"usage: pkg add-remote <name> <url> <key>\")\
+    end\
+    local ok, why = pkg.addRemoteRepo(name, url, key)\
+    if not ok then\
+        die(why)\
+    end\
+    out(\"pkg: added remote \" .. name)\
+elseif cmd == \"sync\" then\
+    local results, why = pkg.sync(args)\
+    if not results then\
+        die(why)\
+    end\
+    for _, result in ipairs(results) do\
+        out((result.ok and \"ok  \" or \"bad \") .. result.name .. \"  \" .. tostring(result.message or \"\"))\
+    end\
+    if why then\
+        die(why)\
+    end\
+elseif cmd == \"index\" then\
+    local repo = args[1] or \"/var/cache/pkg/repo\"\
+    local ok, why = pkg.indexRepo(repo, args[2])\
+    if not ok then\
+        die(why)\
+    end\
+    out(\"pkg: indexed \" .. repo)\
+elseif cmd == \"sign-index\" then\
+    local repo, key = args[1], args[2]\
+    if not repo or not key then\
+        die(\"usage: pkg sign-index <repo-dir> <key>\")\
+    end\
+    local ok, why = pkg.signIndex(repo, key)\
+    if not ok then\
+        die(why)\
+    end\
+    out(\"pkg: signed \" .. repo)\
+elseif cmd == \"audit\" then\
+    local path = args[1]\
+    if not path then\
+        die(\"missing manifest path\")\
+    end\
+    local manifest, why = pkg.loadManifestFile(path)\
+    if not manifest then\
+        die(why)\
+    end\
+    out(\"pkg: ok \" .. manifest.name .. \"-\" .. manifest.version)\
+elseif cmd == \"checksum\" then\
+    out(pkg.checksum(table.concat(args, \" \")))\
+elseif cmd == \"search\" then\
+    local results, why = pkg.search(args[1] or \"\")\
+    if not results then\
+        die(why)\
+    end\
+    for _, entry in ipairs(results) do\
+        out(string.format(\"%s-%s  %s\", entry.name, entry.version, entry.description or \"\"))\
+    end\
+elseif cmd == \"info\" then\
+    local name = args[1]\
+    if not name then\
+        die(\"missing package name\")\
+    end\
+    local manifest, why = pkg.findPackage(name)\
+    if not manifest then\
+        die(why)\
+    end\
+    out(manifest.name .. \"-\" .. manifest.version)\
+    out(manifest.description or \"\")\
+    if #(manifest.depends or {}) > 0 then\
+        out(\"depends: \" .. table.concat(manifest.depends, \", \"))\
+    end\
+    out(\"files: \" .. tostring(#(manifest.files or {})))\
+elseif cmd == \"install\" then\
+    local flags, names = parseFlags(args)\
+    local ok, msg, plan = pkg.install(names, flags)\
+    if not ok then\
+        die(msg)\
+    end\
+    if plan then\
+        for _, manifest in ipairs(plan) do\
+            out((flags.dryRun and \"would install \" or \"installed \") .. manifest.name .. \"-\" .. manifest.version)\
+        end\
+    end\
+    out(\"pkg: \" .. msg)\
+elseif cmd == \"remove\" then\
+    local flags, names = parseFlags(args)\
+    local ok, msg = pkg.remove(names, flags)\
+    if not ok then\
+        die(msg)\
+    end\
+    out(\"pkg: \" .. msg)\
+elseif cmd == \"list\" then\
+    local list, why = pkg.listInstalled()\
+    if not list then\
+        die(why)\
+    end\
+    for _, meta in ipairs(list) do\
+        out(meta.name .. \"-\" .. meta.version)\
+    end\
+elseif cmd == \"files\" then\
+    local name = args[1]\
+    if not name then\
+        die(\"missing package name\")\
+    end\
+    local files, why = pkg.files(name)\
+    if not files then\
+        die(why)\
+    end\
+    for _, file in ipairs(files) do\
+        out(file.path)\
+    end\
+elseif cmd == \"check\" then\
+    local results, why = pkg.check(args[1])\
+    if not results then\
+        die(why)\
+    end\
+    local bad = 0\
+    for _, result in ipairs(results) do\
+        if result.ok then\
+            out(\"ok  \" .. result.path)\
+        else\
+            bad = bad + 1\
+            out(\"bad \" .. result.path .. \" \" .. tostring(result.error or \"checksum\"))\
+        end\
+    end\
+    if bad > 0 then\
+        syscall.exit(1)\
+    end\
+else\
+    usage()\
+    die(\"unknown command: \" .. tostring(cmd))\
+end\
+",
+    },
+    {
+      checksum = "sha256:911ee5f40979dccadddd9dc277170844f10dab65df3c95e25fdee3815755cae8:38163",
+      path = "/usr/lib/pkg.lua",
+      text = "local pkg = {}\
+local sha256Ok, sha256 = pcall(require, \"sha256\")\
+\
+local ROOT = \"/\"\
+local DB_DIR = \"/var/db/pkg\"\
+local CACHE_DIR = \"/var/cache/pkg\"\
+local DEFAULT_REPO_DIR = \"/var/cache/pkg/repo\"\
+local REPOS_FILE = \"/etc/pkg/repos.lua\"\
+local INSTALLED_FILE = DB_DIR .. \"/installed.lua\"\
+local OWNERS_FILE = DB_DIR .. \"/owners.lua\"\
+\
+local RESERVED_PREFIXES = {\
+    \"/boot\",\
+    \"/dev\",\
+    \"/home\",\
+    \"/proc\",\
+    \"/root\",\
+    \"/tmp\",\
+    \"/var/db/pkg\",\
+}\
+\
+local SAFE_PREFIXES = {\
+    \"/bin\",\
+    \"/sbin\",\
+    \"/etc\",\
+    \"/lib\",\
+    \"/opt\",\
+    \"/usr\",\
+    \"/var/cache\",\
+    \"/var/lib\",\
+    \"/var/log\",\
+}\
+\
+local function cleanError(err)\
+    err = tostring(err or \"unknown error\")\
+    return err:match(\"^([^\\n]+)\") or err\
+end\
+\
+local function okName(name)\
+    return type(name) == \"string\" and name:match(\"^[A-Za-z0-9][A-Za-z0-9_.+%-]*$\") ~= nil\
+end\
+\
+local function okVersion(version)\
+    return type(version) == \"string\" and version:match(\"^[A-Za-z0-9][A-Za-z0-9_.+%-:]*$\") ~= nil\
+end\
+\
+local function normalize(path)\
+    path = tostring(path or \"\")\
+    if path == \"\" then\
+        return \"/\"\
+    end\
+    local absolute = path:sub(1, 1) == \"/\"\
+    local parts = {}\
+    for part in path:gmatch(\"[^/]+\") do\
+        if part == \"..\" then\
+            if #parts > 0 then\
+                table.remove(parts)\
+            end\
+        elseif part ~= \".\" and part ~= \"\" then\
+            parts[#parts + 1] = part\
+        end\
+    end\
+    local out = \"/\" .. table.concat(parts, \"/\")\
+    if not absolute then\
+        return out\
+    end\
+    return out\
+end\
+\
+local function parent(path)\
+    path = normalize(path)\
+    if path == \"/\" then\
+        return \"/\"\
+    end\
+    local p = path:match(\"^(.*)/[^/]+$\")\
+    if not p or p == \"\" then\
+        return \"/\"\
+    end\
+    return p\
+end\
+\
+local function join(path, name)\
+    path = normalize(path)\
+    if path == \"/\" then\
+        return \"/\" .. name\
+    end\
+    return path .. \"/\" .. name\
+end\
+\
+local function trimSlash(value)\
+    return tostring(value or \"\"):gsub(\"/+$\", \"\")\
+end\
+\
+local function urlJoin(base, rel)\
+    base = trimSlash(base)\
+    rel = tostring(rel or \"\"):gsub(\"^/+\", \"\")\
+    return base .. \"/\" .. rel\
+end\
+\
+local function safeRepoName(repo)\
+    local name = tostring((repo and repo.name) or (repo and repo.url) or (repo and repo.path) or \"repo\")\
+    name = name:gsub(\"[^A-Za-z0-9_.+%-]\", \"_\")\
+    if name == \"\" then\
+        name = \"repo\"\
+    end\
+    return name\
+end\
+\
+local function safeRelPath(path)\
+    path = tostring(path or \"\"):gsub(\"^/+\", \"\")\
+    if path == \"\" then\
+        return nil, \"empty relative path\"\
+    end\
+    local parts = {}\
+    for part in path:gmatch(\"[^/]+\") do\
+        if part == \"..\" or part == \".\" or part == \"\" then\
+            return nil, \"unsafe relative path: \" .. path\
+        end\
+        parts[#parts + 1] = part\
+    end\
+    return table.concat(parts, \"/\")\
+end\
+\
+local function isRemoteRepo(repo)\
+    return type(repo) == \"table\" and type(repo.url) == \"string\" and repo.url ~= \"\"\
+end\
+\
+local function repoCacheDir(repo)\
+    return join(CACHE_DIR .. \"/repos\", safeRepoName(repo))\
+end\
+\
+local function startsWith(path, prefix)\
+    return path == prefix or path:sub(1, #prefix + 1) == prefix .. \"/\"\
+end\
+\
+local function pathAllowed(path, manifest)\
+    path = normalize(path)\
+    if path == \"/\" then\
+        return false, \"refusing to manage /\"\
+    end\
+    for _, prefix in ipairs(RESERVED_PREFIXES) do\
+        if startsWith(path, prefix) then\
+            return false, \"reserved path: \" .. path\
+        end\
+    end\
+    if startsWith(path, \"/lib/modules\") and not (manifest and manifest.allowKernel) then\
+        return false, \"kernel module path requires allowKernel=true\"\
+    end\
+    for _, prefix in ipairs(SAFE_PREFIXES) do\
+        if startsWith(path, prefix) then\
+            return true\
+        end\
+    end\
+    return false, \"unsafe path: \" .. path\
+end\
+\
+local function readFile(path)\
+    local ok, fd = pcall(syscall.open, path, \"r\")\
+    if not ok then\
+        return nil, cleanError(fd)\
+    end\
+    local chunks = {}\
+    while true do\
+        local readOk, data = pcall(syscall.read, fd, 4096)\
+        if not readOk then\
+            pcall(syscall.close, fd)\
+            return nil, cleanError(data)\
+        end\
+        if not data or data == \"\" then\
+            break\
+        end\
+        chunks[#chunks + 1] = data\
+    end\
+    pcall(syscall.close, fd)\
+    return table.concat(chunks)\
+end\
+\
+local function writeFile(path, data)\
+    local ok, fd = pcall(syscall.open, path, \"w\")\
+    if not ok then\
+        return false, cleanError(fd)\
+    end\
+    local wrote, why = pcall(syscall.write, fd, tostring(data or \"\"))\
+    pcall(syscall.close, fd)\
+    if not wrote then\
+        return false, cleanError(why)\
+    end\
+    return true\
+end\
+\
+local function httpGet(url)\
+    url = tostring(url or \"\")\
+    if url == \"\" then\
+        return nil, \"empty url\"\
+    end\
+    if syscall and type(syscall.http_get) == \"function\" then\
+        local ok, body = pcall(syscall.http_get, url)\
+        if ok and type(body) == \"string\" then\
+            return body\
+        elseif ok and type(body) == \"table\" and type(body.body) == \"string\" then\
+            return body.body\
+        elseif not ok then\
+            return nil, cleanError(body)\
+        end\
+    end\
+    local root = _G or {}\
+    local httpApi = root.http\
+    if type(httpApi) == \"table\" and type(httpApi.get) == \"function\" then\
+        local ok, handle = pcall(httpApi.get, url)\
+        if not ok then\
+            return nil, cleanError(handle)\
+        end\
+        if not handle then\
+            return nil, \"http.get failed\"\
+        end\
+        if type(handle) == \"string\" then\
+            return handle\
+        end\
+        local body\
+        if type(handle.readAll) == \"function\" then\
+            body = handle.readAll()\
+        elseif type(handle.read) == \"function\" then\
+            local chunks = {}\
+            while true do\
+                local chunk = handle.read(4096)\
+                if not chunk or chunk == \"\" then\
+                    break\
+                end\
+                chunks[#chunks + 1] = chunk\
+            end\
+            body = table.concat(chunks)\
+        end\
+        if type(handle.close) == \"function\" then\
+            pcall(handle.close)\
+        end\
+        if type(body) == \"string\" then\
+            return body\
+        end\
+        return nil, \"http response is not readable\"\
+    end\
+    return nil, \"no http backend available\"\
+end\
+\
+local function exists(path)\
+    local ok, value = pcall(syscall.exists, path)\
+    if ok then\
+        return value and true or false\
+    end\
+    local tOk, t = pcall(syscall.type, path)\
+    return tOk and t ~= nil\
+end\
+\
+local function typeOf(path)\
+    local ok, t = pcall(syscall.type, path)\
+    return ok and t or nil\
+end\
+\
+local function mkdir(path)\
+    path = normalize(path)\
+    if exists(path) then\
+        return typeOf(path) == \"directory\"\
+    end\
+    local p = parent(path)\
+    if p ~= path and not exists(p) then\
+        local ok, why = mkdir(p)\
+        if not ok then\
+            return false, why\
+        end\
+    end\
+    local ok, why = pcall(syscall.mkdir, path .. \"/\")\
+    if not ok then\
+        ok, why = pcall(syscall.mkdir, path)\
+    end\
+    if not ok then\
+        return false, cleanError(why)\
+    end\
+    return true\
+end\
+\
+local function sortedKeys(t)\
+    local keys = {}\
+    for key in pairs(t or {}) do\
+        keys[#keys + 1] = key\
+    end\
+    table.sort(keys, function(a, b)\
+        return tostring(a) < tostring(b)\
+    end)\
+    return keys\
+end\
+\
+local function quoteString(value)\
+    return string.format(\"%q\", tostring(value or \"\"))\
+end\
+\
+local function serialize(value, seen)\
+    seen = seen or {}\
+    local tv = type(value)\
+    if tv == \"nil\" then\
+        return \"nil\"\
+    elseif tv == \"boolean\" or tv == \"number\" then\
+        return tostring(value)\
+    elseif tv == \"string\" then\
+        return quoteString(value)\
+    elseif tv ~= \"table\" then\
+        error(\"cannot serialize \" .. tv)\
+    end\
+    if seen[value] then\
+        error(\"cannot serialize circular table\")\
+    end\
+    seen[value] = true\
+    local out = { \"{\" }\
+    local arrayLen = #value\
+    local first = true\
+    for i = 1, arrayLen do\
+        if not first then\
+            out[#out + 1] = \",\"\
+        end\
+        first = false\
+        out[#out + 1] = serialize(value[i], seen)\
+    end\
+    local mapKeys = {}\
+    for key in pairs(value) do\
+        if not (type(key) == \"number\" and key >= 1 and key <= arrayLen and key == math.floor(key)) then\
+            mapKeys[#mapKeys + 1] = key\
+        end\
+    end\
+    table.sort(mapKeys, function(a, b)\
+        return tostring(a) < tostring(b)\
+    end)\
+    for _, key in ipairs(mapKeys) do\
+        if not first then\
+            out[#out + 1] = \",\"\
+        end\
+        first = false\
+        if type(key) == \"string\" and key:match(\"^[A-Za-z_][A-Za-z0-9_]*$\") then\
+            out[#out + 1] = key\
+        else\
+            out[#out + 1] = \"[\" .. serialize(key, seen) .. \"]\"\
+        end\
+        out[#out + 1] = \"=\" .. serialize(value[key], seen)\
+    end\
+    out[#out + 1] = \"}\"\
+    seen[value] = nil\
+    return table.concat(out)\
+end\
+\
+local function loadLuaTable(path)\
+    local text, why = readFile(path)\
+    if not text then\
+        return nil, why\
+    end\
+    local chunk, loadErr = load(text, \"@\" .. path, \"t\", {})\
+    if not chunk then\
+        return nil, cleanError(loadErr)\
+    end\
+    local ok, value = pcall(chunk)\
+    if not ok then\
+        return nil, cleanError(value)\
+    end\
+    if type(value) ~= \"table\" then\
+        return nil, \"expected table\"\
+    end\
+    return value\
+end\
+\
+local function saveLuaTable(path, value)\
+    return writeFile(path, \"return \" .. serialize(value) .. \"\\n\")\
+end\
+\
+local function legacyChecksum(data)\
+    data = tostring(data or \"\")\
+    local h1 = 5381\
+    local h2 = 52711\
+    for i = 1, #data do\
+        local b = data:byte(i)\
+        h1 = (h1 * 33 + b) % 4294967296\
+        h2 = (h2 * 131 + b) % 4294967296\
+    end\
+    return string.format(\"h1:%08x%08x:%d\", h1, h2, #data)\
+end\
+\
+function pkg.checksum(data)\
+    data = tostring(data or \"\")\
+    if sha256Ok and sha256 and type(sha256.digest) == \"function\" then\
+        return \"sha256:\" .. sha256.digest(data):toHex() .. \":\" .. tostring(#data)\
+    end\
+    return legacyChecksum(data)\
+end\
+\
+function pkg.hmac(data, key)\
+    if not (sha256Ok and sha256 and type(sha256.hmac) == \"function\") then\
+        return nil, \"sha256 hmac unavailable\"\
+    end\
+    if type(key) ~= \"string\" or key == \"\" then\
+        return nil, \"missing hmac key\"\
+    end\
+    return \"hmac-sha256:\" .. sha256.hmac(tostring(data or \"\"), key):toHex()\
+end\
+\
+local function checksumMatches(expected, data)\
+    if not expected then\
+        return true\
+    end\
+    return expected == pkg.checksum(data) or expected == legacyChecksum(data)\
+end\
+\
+local function hmacMatches(signature, data, key)\
+    local expected, err = pkg.hmac(data, key)\
+    if not expected then\
+        return false, err\
+    end\
+    signature = tostring(signature or \"\"):match(\"^%s*(.-)%s*$\")\
+    local raw = expected:match(\"^hmac%-sha256:(.+)$\")\
+    return signature == expected or signature == raw\
+end\
+\
+local function defaultRepos()\
+    return {\
+        format = 1,\
+        repos = {\
+            {\
+                name = \"local\",\
+                path = DEFAULT_REPO_DIR,\
+                trusted = true,\
+            },\
+        },\
+    }\
+end\
+\
+function pkg.init()\
+    for _, dir in ipairs({ \"/etc/pkg\", DB_DIR, CACHE_DIR, CACHE_DIR .. \"/repos\", DEFAULT_REPO_DIR }) do\
+        local ok, why = mkdir(dir)\
+        if not ok then\
+            return false, why\
+        end\
+    end\
+    if not exists(REPOS_FILE) then\
+        local ok, why = saveLuaTable(REPOS_FILE, defaultRepos())\
+        if not ok then\
+            return false, why\
+        end\
+    end\
+    if not exists(INSTALLED_FILE) then\
+        local ok, why = saveLuaTable(INSTALLED_FILE, { format = 1, packages = {} })\
+        if not ok then\
+            return false, why\
+        end\
+    end\
+    if not exists(OWNERS_FILE) then\
+        local ok, why = saveLuaTable(OWNERS_FILE, { format = 1, owners = {} })\
+        if not ok then\
+            return false, why\
+        end\
+    end\
+    return true\
+end\
+\
+local function ensureInit()\
+    if not exists(DB_DIR) or not exists(REPOS_FILE) or not exists(INSTALLED_FILE) or not exists(OWNERS_FILE) then\
+        return pkg.init()\
+    end\
+    return true\
+end\
+\
+local function loadInstalled()\
+    local ok, why = ensureInit()\
+    if not ok then\
+        return nil, why\
+    end\
+    local db, err = loadLuaTable(INSTALLED_FILE)\
+    if not db then\
+        return nil, err\
+    end\
+    db.packages = db.packages or {}\
+    return db\
+end\
+\
+local function saveInstalled(db)\
+    db.format = 1\
+    db.packages = db.packages or {}\
+    return saveLuaTable(INSTALLED_FILE, db)\
+end\
+\
+local function loadOwners()\
+    local ok, why = ensureInit()\
+    if not ok then\
+        return nil, why\
+    end\
+    local db, err = loadLuaTable(OWNERS_FILE)\
+    if not db then\
+        return nil, err\
+    end\
+    db.owners = db.owners or {}\
+    return db\
+end\
+\
+local function saveOwners(db)\
+    db.format = 1\
+    db.owners = db.owners or {}\
+    return saveLuaTable(OWNERS_FILE, db)\
+end\
+\
+local function loadRepos()\
+    local ok, why = ensureInit()\
+    if not ok then\
+        return nil, why\
+    end\
+    local config, err = loadLuaTable(REPOS_FILE)\
+    if not config then\
+        return nil, err\
+    end\
+    config.repos = config.repos or {}\
+    return config.repos\
+end\
+\
+local function normalizeFileEntry(entry)\
+    if type(entry) ~= \"table\" then\
+        return nil, \"file entry is not a table\"\
+    end\
+    local path = normalize(entry.path)\
+    if path == \"/\" or not entry.path then\
+        return nil, \"file entry missing path\"\
+    end\
+    local data = entry.text\
+    if data == nil then\
+        data = entry.data\
+    end\
+    if type(data) ~= \"string\" then\
+        return nil, \"file \" .. path .. \" missing text\"\
+    end\
+    return {\
+        path = path,\
+        text = data,\
+        checksum = entry.checksum,\
+        mode = entry.mode,\
+    }\
+end\
+\
+function pkg.validateManifest(manifest, opts)\
+    opts = opts or {}\
+    if type(manifest) ~= \"table\" then\
+        return false, { \"manifest is not a table\" }\
+    end\
+    local errors = {}\
+    local function add(msg)\
+        errors[#errors + 1] = msg\
+    end\
+    if manifest.format ~= 1 then\
+        add(\"format must be 1\")\
+    end\
+    if not okName(manifest.name) then\
+        add(\"invalid package name\")\
+    end\
+    if not okVersion(manifest.version) then\
+        add(\"invalid package version\")\
+    end\
+    if manifest.depends ~= nil and type(manifest.depends) ~= \"table\" then\
+        add(\"depends must be a table\")\
+    end\
+    for _, dep in ipairs(manifest.depends or {}) do\
+        if not okName(dep) then\
+            add(\"invalid dependency: \" .. tostring(dep))\
+        end\
+    end\
+    local seen = {}\
+    local files = {}\
+    for i, raw in ipairs(manifest.files or {}) do\
+        local entry, err = normalizeFileEntry(raw)\
+        if not entry then\
+            add(\"files[\" .. tostring(i) .. \"]: \" .. err)\
+        else\
+            local allowed, why = pathAllowed(entry.path, manifest)\
+            if not allowed then\
+                add(entry.path .. \": \" .. why)\
+            end\
+            if seen[entry.path] then\
+                add(\"duplicate file path: \" .. entry.path)\
+            end\
+            seen[entry.path] = true\
+            if entry.checksum and not checksumMatches(entry.checksum, entry.text) then\
+                add(\"checksum mismatch in manifest for \" .. entry.path)\
+            end\
+            files[#files + 1] = entry\
+        end\
+    end\
+    for i, dir in ipairs(manifest.dirs or {}) do\
+        if type(dir) ~= \"string\" then\
+            add(\"dirs[\" .. tostring(i) .. \"] is not a string\")\
+        else\
+            local path = normalize(dir)\
+            local allowed, why = pathAllowed(path, manifest)\
+            if not allowed then\
+                add(path .. \": \" .. why)\
+            end\
+        end\
+    end\
+    if opts.requireFiles and #files == 0 then\
+        add(\"package has no files\")\
+    end\
+    return #errors == 0, errors, files\
+end\
+\
+local function loadManifest(path)\
+    local manifest, err = loadLuaTable(path)\
+    if not manifest then\
+        return nil, err\
+    end\
+    local ok, errors = pkg.validateManifest(manifest, { requireFiles = true })\
+    if not ok then\
+        return nil, table.concat(errors, \"; \")\
+    end\
+    manifest._source = path\
+    return manifest\
+end\
+\
+local function repoIndexPath(repo)\
+    if isRemoteRepo(repo) then\
+        return join(repoCacheDir(repo), \"index.lua\")\
+    end\
+    return normalize(join(repo.path, \"index.lua\"))\
+end\
+\
+local function repoSignaturePath(repo)\
+    if isRemoteRepo(repo) then\
+        return join(repoCacheDir(repo), \"index.hmac\")\
+    end\
+    return normalize(join(repo.path, \"index.hmac\"))\
+end\
+\
+local function packagePath(repo, entry)\
+    if isRemoteRepo(repo) then\
+        local rel, err = safeRelPath(entry.path or (entry.name .. \".pkg.lua\"))\
+        if not rel then\
+            return nil, err\
+        end\
+        return join(repoCacheDir(repo), rel)\
+    end\
+    if entry.path then\
+        return normalize(join(repo.path, entry.path))\
+    end\
+    return normalize(join(repo.path, entry.name .. \".pkg.lua\"))\
+end\
+\
+local function remotePackageUrl(repo, entry)\
+    local rel, err = safeRelPath(entry.path or (entry.name .. \".pkg.lua\"))\
+    if not rel then\
+        return nil, err\
+    end\
+    return urlJoin(repo.url, rel)\
+end\
+\
+local function ensureRemotePackage(repo, entry)\
+    local path, pathErr = packagePath(repo, entry)\
+    if not path then\
+        return nil, pathErr\
+    end\
+    local cached = readFile(path)\
+    if cached and entry.manifestChecksum and checksumMatches(entry.manifestChecksum, cached) then\
+        return path\
+    elseif cached and not entry.manifestChecksum then\
+        return path\
+    end\
+    if not entry.manifestChecksum then\
+        return nil, \"remote package missing manifest checksum: \" .. tostring(entry.name)\
+    end\
+    local url, urlErr = remotePackageUrl(repo, entry)\
+    if not url then\
+        return nil, urlErr\
+    end\
+    local text, err = httpGet(url)\
+    if not text then\
+        return nil, err\
+    end\
+    if not checksumMatches(entry.manifestChecksum, text) then\
+        return nil, \"downloaded package checksum mismatch: \" .. tostring(entry.name)\
+    end\
+    local made, makeErr = mkdir(parent(path))\
+    if not made then\
+        return nil, makeErr\
+    end\
+    local wrote, writeErr = writeFile(path, text)\
+    if not wrote then\
+        return nil, writeErr\
+    end\
+    return path\
+end\
+\
+function pkg.indexRepo(repoDir, outPath)\
+    repoDir = normalize(repoDir or DEFAULT_REPO_DIR)\
+    outPath = outPath and normalize(outPath) or join(repoDir, \"index.lua\")\
+    local okList, list = pcall(syscall.listdir, repoDir)\
+    if not okList then\
+        return false, cleanError(list)\
+    end\
+    local index = {\
+        format = 1,\
+        repository = {\
+            name = repoDir:match(\"([^/]+)$\") or \"local\",\
+        },\
+        packages = {},\
+    }\
+    table.sort(list)\
+    for _, name in ipairs(list or {}) do\
+        if name:match(\"%.pkg%.lua$\") then\
+            local path = join(repoDir, name)\
+            local manifest, err = loadManifest(path)\
+            if not manifest then\
+                return false, name .. \": \" .. err\
+            end\
+            if index.packages[manifest.name] then\
+                return false, \"duplicate package in repo: \" .. manifest.name\
+            end\
+            index.packages[manifest.name] = {\
+                name = manifest.name,\
+                version = manifest.version,\
+                description = manifest.description or \"\",\
+                depends = manifest.depends or {},\
+                path = name,\
+                manifestChecksum = pkg.checksum(readFile(path) or \"\"),\
+            }\
+        end\
+    end\
+    return saveLuaTable(outPath, index)\
+end\
+\
+function pkg.signIndex(repoDir, key)\
+    repoDir = normalize(repoDir or DEFAULT_REPO_DIR)\
+    local indexPath = join(repoDir, \"index.lua\")\
+    local text, why = readFile(indexPath)\
+    if not text then\
+        return false, why\
+    end\
+    local sig, err = pkg.hmac(text, key)\
+    if not sig then\
+        return false, err\
+    end\
+    return writeFile(join(repoDir, \"index.hmac\"), sig .. \"\\n\")\
+end\
+\
+local function verifyRepoSignature(repo, indexText, sigText)\
+    if not repo.key or repo.key == \"\" then\
+        return false, \"repo missing hmac key: \" .. tostring(repo.name or repo.url)\
+    end\
+    if not sigText or sigText == \"\" then\
+        return false, \"repo missing index.hmac: \" .. tostring(repo.name or repo.url)\
+    end\
+    if not hmacMatches(sigText, indexText, repo.key) then\
+        return false, \"repo hmac verification failed: \" .. tostring(repo.name or repo.url)\
+    end\
+    return true\
+end\
+\
+local function syncRepo(repo)\
+    if not isRemoteRepo(repo) then\
+        return true, \"local\"\
+    end\
+    if repo.trusted ~= true then\
+        return false, \"untrusted repo: \" .. tostring(repo.name or repo.url)\
+    end\
+    local indexUrl = urlJoin(repo.url, \"index.lua\")\
+    local sigUrl = urlJoin(repo.url, \"index.hmac\")\
+    local indexText, indexErr = httpGet(indexUrl)\
+    if not indexText then\
+        return false, indexErr\
+    end\
+    local sigText, sigErr = httpGet(sigUrl)\
+    if not sigText then\
+        return false, sigErr\
+    end\
+    local ok, why = verifyRepoSignature(repo, indexText, sigText)\
+    if not ok then\
+        return false, why\
+    end\
+    local dir = repoCacheDir(repo)\
+    local made, makeErr = mkdir(dir)\
+    if not made then\
+        return false, makeErr\
+    end\
+    local wrote, writeErr = writeFile(join(dir, \"index.lua\"), indexText)\
+    if not wrote then\
+        return false, writeErr\
+    end\
+    wrote, writeErr = writeFile(join(dir, \"index.hmac\"), sigText)\
+    if not wrote then\
+        return false, writeErr\
+    end\
+    local index, loadErr = loadLuaTable(join(dir, \"index.lua\"))\
+    if not index then\
+        return false, loadErr\
+    end\
+    if index.format ~= 1 or type(index.packages) ~= \"table\" then\
+        return false, \"invalid remote repo index\"\
+    end\
+    return true, \"synced\"\
+end\
+\
+function pkg.sync(names)\
+    local repos, err = loadRepos()\
+    if not repos then\
+        return nil, err\
+    end\
+    local selected = {}\
+    if names and #names > 0 then\
+        local want = {}\
+        for _, name in ipairs(names) do\
+            want[name] = true\
+        end\
+        for _, repo in ipairs(repos) do\
+            if want[repo.name] or want[repo.url] or want[repo.path] then\
+                selected[#selected + 1] = repo\
+            end\
+        end\
+    else\
+        selected = repos\
+    end\
+    local results = {}\
+    for _, repo in ipairs(selected) do\
+        local ok, msg = syncRepo(repo)\
+        results[#results + 1] = {\
+            name = repo.name or repo.url or repo.path,\
+            remote = isRemoteRepo(repo),\
+            ok = ok and true or false,\
+            message = msg,\
+        }\
+        if not ok then\
+            return results, msg\
+        end\
+    end\
+    return results\
+end\
+\
+local function loadRepoIndex(repo)\
+    if repo.trusted ~= true then\
+        return nil, \"untrusted repo: \" .. tostring(repo.name or repo.path)\
+    end\
+    local indexPath = repoIndexPath(repo)\
+    if not exists(indexPath) then\
+        if isRemoteRepo(repo) then\
+            return nil, \"missing repo index: \" .. indexPath .. \" (run pkg sync)\"\
+        end\
+        return nil, \"missing repo index: \" .. indexPath\
+    end\
+    if isRemoteRepo(repo) then\
+        local indexText, readErr = readFile(indexPath)\
+        if not indexText then\
+            return nil, readErr\
+        end\
+        local sigText, sigErr = readFile(repoSignaturePath(repo))\
+        if not sigText then\
+            return nil, sigErr\
+        end\
+        local ok, why = verifyRepoSignature(repo, indexText, sigText)\
+        if not ok then\
+            return nil, why\
+        end\
+    end\
+    local index, err = loadLuaTable(indexPath)\
+    if not index then\
+        return nil, err\
+    end\
+    if index.format ~= 1 or type(index.packages) ~= \"table\" then\
+        return nil, \"invalid repo index\"\
+    end\
+    return index\
+end\
+\
+function pkg.findPackage(name)\
+    local repos, err = loadRepos()\
+    if not repos then\
+        return nil, err\
+    end\
+    for _, repo in ipairs(repos) do\
+        local index, indexErr = loadRepoIndex(repo)\
+        if not index then\
+            if not tostring(indexErr):find(\"missing repo index\", 1, true) then\
+                return nil, indexErr\
+            end\
+        else\
+            local entry = index.packages[name]\
+            if entry then\
+                local manifestPath, pathErr\
+                if isRemoteRepo(repo) then\
+                    manifestPath, pathErr = ensureRemotePackage(repo, entry)\
+                else\
+                    manifestPath, pathErr = packagePath(repo, entry)\
+                end\
+                if not manifestPath then\
+                    return nil, pathErr\
+                end\
+                local manifest, mErr = loadManifest(manifestPath)\
+                if not manifest then\
+                    return nil, mErr\
+                end\
+                if entry.manifestChecksum then\
+                    local text = readFile(manifestPath) or \"\"\
+                    if not checksumMatches(entry.manifestChecksum, text) then\
+                        return nil, \"repo index checksum mismatch for \" .. name\
+                    end\
+                end\
+                return manifest, repo\
+            end\
+        end\
+    end\
+    return nil, \"package not found: \" .. tostring(name)\
+end\
+\
+function pkg.search(query)\
+    query = tostring(query or \"\"):lower()\
+    local repos, err = loadRepos()\
+    if not repos then\
+        return nil, err\
+    end\
+    local out = {}\
+    for _, repo in ipairs(repos) do\
+        local index, indexErr = loadRepoIndex(repo)\
+        if not index then\
+            if not tostring(indexErr):find(\"missing repo index\", 1, true) then\
+                return nil, indexErr\
+            end\
+        else\
+            for _, entry in pairs(index.packages or {}) do\
+                local hay = table.concat({ entry.name or \"\", entry.version or \"\", entry.description or \"\" }, \" \"):lower()\
+                if query == \"\" or hay:find(query, 1, true) then\
+                    out[#out + 1] = {\
+                        name = entry.name,\
+                        version = entry.version,\
+                        description = entry.description or \"\",\
+                        repo = repo.name or repo.path,\
+                    }\
+                end\
+            end\
+        end\
+    end\
+    table.sort(out, function(a, b)\
+        return a.name < b.name\
+    end)\
+    return out\
+end\
+\
+local function resolvePlan(names, installed, plan, visiting)\
+    plan = plan or {}\
+    visiting = visiting or {}\
+    for _, name in ipairs(names) do\
+        if not installed.packages[name] and not plan[name] then\
+            if visiting[name] then\
+                return nil, \"dependency cycle at \" .. name\
+            end\
+            visiting[name] = true\
+            local manifest, err = pkg.findPackage(name)\
+            if not manifest then\
+                return nil, err\
+            end\
+            local ok, why = resolvePlan(manifest.depends or {}, installed, plan, visiting)\
+            if not ok then\
+                return nil, why\
+            end\
+            plan[name] = manifest\
+            visiting[name] = nil\
+        end\
+    end\
+    return plan\
+end\
+\
+local function orderedPlan(plan)\
+    local out = {}\
+    local added = {}\
+    local function add(name)\
+        if added[name] then\
+            return\
+        end\
+        local manifest = plan[name]\
+        if not manifest then\
+            return\
+        end\
+        for _, dep in ipairs(manifest.depends or {}) do\
+            add(dep)\
+        end\
+        added[name] = true\
+        out[#out + 1] = manifest\
+    end\
+    for _, name in ipairs(sortedKeys(plan)) do\
+        add(name)\
+    end\
+    return out\
+end\
+\
+local function preflightInstall(manifests, installed, owners)\
+    for _, manifest in ipairs(manifests) do\
+        local ok, errors, files = pkg.validateManifest(manifest, { requireFiles = true })\
+        if not ok then\
+            return false, manifest.name .. \": \" .. table.concat(errors, \"; \")\
+        end\
+        for _, dep in ipairs(manifest.depends or {}) do\
+            local depInstalled = installed.packages[dep]\
+            local depPlanned = false\
+            for _, other in ipairs(manifests) do\
+                if other.name == dep then\
+                    depPlanned = true\
+                    break\
+                end\
+            end\
+            if not depInstalled and not depPlanned then\
+                return false, manifest.name .. \": missing dependency \" .. dep\
+            end\
+        end\
+        for _, entry in ipairs(files) do\
+            local owner = owners.owners[entry.path]\
+            if owner and owner ~= manifest.name then\
+                return false, entry.path .. \" is owned by \" .. owner\
+            end\
+            local t = typeOf(entry.path)\
+            if t == \"directory\" then\
+                return false, entry.path .. \" is a directory\"\
+            end\
+            if t == \"file\" and not owner then\
+                return false, entry.path .. \" exists and is not package-owned\"\
+            end\
+        end\
+    end\
+    return true\
+end\
+\
+function pkg.install(names, opts)\
+    opts = opts or {}\
+    if #names == 0 then\
+        return false, \"no package names given\"\
+    end\
+    local installed, err = loadInstalled()\
+    if not installed then\
+        return false, err\
+    end\
+    local owners, ownerErr = loadOwners()\
+    if not owners then\
+        return false, ownerErr\
+    end\
+    local plan, planErr = resolvePlan(names, installed)\
+    if not plan then\
+        return false, planErr\
+    end\
+    local ordered = orderedPlan(plan)\
+    if #ordered == 0 then\
+        return true, \"nothing to do\"\
+    end\
+    local ok, why = preflightInstall(ordered, installed, owners)\
+    if not ok then\
+        return false, why\
+    end\
+    if opts.dryRun then\
+        return true, \"would install \" .. tostring(#ordered) .. \" package(s)\", ordered\
+    end\
+    local written = {}\
+    for _, manifest in ipairs(ordered) do\
+        local _, _, files = pkg.validateManifest(manifest, { requireFiles = true })\
+        for _, dir in ipairs(manifest.dirs or {}) do\
+            local made, makeErr = mkdir(dir)\
+            if not made then\
+                return false, makeErr\
+            end\
+        end\
+        for _, entry in ipairs(files) do\
+            local made, makeErr = mkdir(parent(entry.path))\
+            if not made then\
+                return false, makeErr\
+            end\
+            local wrote, writeErr = writeFile(entry.path, entry.text)\
+            if not wrote then\
+                for _, path in ipairs(written) do\
+                    if owners.owners[path] == nil then\
+                        pcall(syscall.remove, path)\
+                    end\
+                end\
+                return false, writeErr\
+            end\
+            local text, readErr = readFile(entry.path)\
+            if not text then\
+                return false, readErr\
+            end\
+            local checksum = pkg.checksum(text)\
+            if checksum ~= pkg.checksum(entry.text) then\
+                return false, \"post-write checksum mismatch: \" .. entry.path\
+            end\
+            if entry.mode and syscall.chmod then\
+                pcall(syscall.chmod, entry.path, entry.mode)\
+            end\
+            written[#written + 1] = entry.path\
+            owners.owners[entry.path] = manifest.name\
+        end\
+        installed.packages[manifest.name] = {\
+            name = manifest.name,\
+            version = manifest.version,\
+            description = manifest.description or \"\",\
+            depends = manifest.depends or {},\
+            files = {},\
+            installedAt = syscall.getUptime and syscall.getUptime() or 0,\
+        }\
+        for _, entry in ipairs(files) do\
+            installed.packages[manifest.name].files[#installed.packages[manifest.name].files + 1] = {\
+                path = entry.path,\
+                checksum = pkg.checksum(entry.text),\
+            }\
+        end\
+    end\
+    local saved, saveErr = saveInstalled(installed)\
+    if not saved then\
+        return false, saveErr\
+    end\
+    saved, saveErr = saveOwners(owners)\
+    if not saved then\
+        return false, saveErr\
+    end\
+    return true, \"installed \" .. tostring(#ordered) .. \" package(s)\", ordered\
+end\
+\
+local function reverseDeps(name, installed)\
+    local users = {}\
+    for otherName, meta in pairs(installed.packages or {}) do\
+        for _, dep in ipairs(meta.depends or {}) do\
+            if dep == name then\
+                users[#users + 1] = otherName\
+            end\
+        end\
+    end\
+    table.sort(users)\
+    return users\
+end\
+\
+function pkg.remove(names, opts)\
+    opts = opts or {}\
+    if #names == 0 then\
+        return false, \"no package names given\"\
+    end\
+    local installed, err = loadInstalled()\
+    if not installed then\
+        return false, err\
+    end\
+    local owners, ownerErr = loadOwners()\
+    if not owners then\
+        return false, ownerErr\
+    end\
+    for _, name in ipairs(names) do\
+        if not installed.packages[name] then\
+            return false, \"not installed: \" .. name\
+        end\
+        if not opts.force then\
+            local users = reverseDeps(name, installed)\
+            for i = #users, 1, -1 do\
+                for _, removing in ipairs(names) do\
+                    if users[i] == removing then\
+                        table.remove(users, i)\
+                        break\
+                    end\
+                end\
+            end\
+            if #users > 0 then\
+                return false, name .. \" is required by \" .. table.concat(users, \", \")\
+            end\
+        end\
+    end\
+    if opts.dryRun then\
+        return true, \"would remove \" .. tostring(#names) .. \" package(s)\"\
+    end\
+    for _, name in ipairs(names) do\
+        local meta = installed.packages[name]\
+        for _, file in ipairs(meta.files or {}) do\
+            if owners.owners[file.path] == name then\
+                pcall(syscall.remove, file.path)\
+                owners.owners[file.path] = nil\
+            end\
+        end\
+        installed.packages[name] = nil\
+    end\
+    local saved, saveErr = saveInstalled(installed)\
+    if not saved then\
+        return false, saveErr\
+    end\
+    saved, saveErr = saveOwners(owners)\
+    if not saved then\
+        return false, saveErr\
+    end\
+    return true, \"removed \" .. tostring(#names) .. \" package(s)\"\
+end\
+\
+function pkg.listInstalled()\
+    local installed, err = loadInstalled()\
+    if not installed then\
+        return nil, err\
+    end\
+    local out = {}\
+    for _, name in ipairs(sortedKeys(installed.packages)) do\
+        out[#out + 1] = installed.packages[name]\
+    end\
+    return out\
+end\
+\
+function pkg.files(name)\
+    local installed, err = loadInstalled()\
+    if not installed then\
+        return nil, err\
+    end\
+    local meta = installed.packages[name]\
+    if not meta then\
+        return nil, \"not installed: \" .. tostring(name)\
+    end\
+    return meta.files or {}\
+end\
+\
+function pkg.check(name)\
+    local installed, err = loadInstalled()\
+    if not installed then\
+        return nil, err\
+    end\
+    local results = {}\
+    local function checkPkg(pkgName, meta)\
+        for _, file in ipairs(meta.files or {}) do\
+            local text, readErr = readFile(file.path)\
+            if not text then\
+                results[#results + 1] = { package = pkgName, path = file.path, ok = false, error = readErr }\
+            else\
+                local sum = pkg.checksum(text)\
+                results[#results + 1] = {\
+                    package = pkgName,\
+                    path = file.path,\
+                    ok = sum == file.checksum,\
+                    expected = file.checksum,\
+                    actual = sum,\
+                }\
+            end\
+        end\
+    end\
+    if name then\
+        local meta = installed.packages[name]\
+        if not meta then\
+            return nil, \"not installed: \" .. name\
+        end\
+        checkPkg(name, meta)\
+    else\
+        for _, pkgName in ipairs(sortedKeys(installed.packages)) do\
+            checkPkg(pkgName, installed.packages[pkgName])\
+        end\
+    end\
+    return results\
+end\
+\
+function pkg.addRepo(path, name)\
+    path = normalize(path)\
+    local ok, why = ensureInit()\
+    if not ok then\
+        return false, why\
+    end\
+    local config, err = loadLuaTable(REPOS_FILE)\
+    if not config then\
+        return false, err\
+    end\
+    config.repos = config.repos or {}\
+    for _, repo in ipairs(config.repos) do\
+        if normalize(repo.path) == path then\
+            repo.name = name or repo.name\
+            repo.trusted = true\
+            return saveLuaTable(REPOS_FILE, config)\
+        end\
+    end\
+    config.repos[#config.repos + 1] = {\
+        name = name or (path:match(\"([^/]+)$\") or \"repo\"),\
+        path = path,\
+        trusted = true,\
+    }\
+    return saveLuaTable(REPOS_FILE, config)\
+end\
+\
+function pkg.addRemoteRepo(name, url, key)\
+    if not okName(name) then\
+        return false, \"invalid repo name\"\
+    end\
+    url = trimSlash(url)\
+    if not url:match(\"^https?://\") then\
+        return false, \"remote repo url must start with http:// or https://\"\
+    end\
+    if type(key) ~= \"string\" or key == \"\" then\
+        return false, \"remote repo requires hmac key\"\
+    end\
+    local ok, why = ensureInit()\
+    if not ok then\
+        return false, why\
+    end\
+    local config, err = loadLuaTable(REPOS_FILE)\
+    if not config then\
+        return false, err\
+    end\
+    config.repos = config.repos or {}\
+    for _, repo in ipairs(config.repos) do\
+        if repo.name == name or trimSlash(repo.url or \"\") == url then\
+            repo.name = name\
+            repo.url = url\
+            repo.path = nil\
+            repo.key = key\
+            repo.trusted = true\
+            return saveLuaTable(REPOS_FILE, config)\
+        end\
+    end\
+    config.repos[#config.repos + 1] = {\
+        name = name,\
+        url = url,\
+        key = key,\
+        trusted = true,\
+    }\
+    return saveLuaTable(REPOS_FILE, config)\
+end\
+\
+function pkg.loadManifestFile(path)\
+    return loadManifest(normalize(path))\
+end\
+\
+function pkg.saveManifest(path, manifest)\
+    return saveLuaTable(normalize(path), manifest)\
+end\
+\
+return pkg\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-pkg",
+  version = "0.1.0",
+}

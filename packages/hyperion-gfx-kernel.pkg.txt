@@ -1,0 +1,642 @@
+return {
+  allowKernel = true,
+  depends = {
+  },
+  description = "Graphics, keyboard input and world-time kernel modules.",
+  files = {
+    {
+      checksum = "sha256:5740a3433f803ce26ebb8e73a541fc820a92d9b1fb73eb86b93c00eee179959f:8922",
+      path = "/lib/modules/hyperion/52_graphics.kmod",
+      text = "local k = ...\
+local sys = k.syscalls\
+local term = k.apis and k.apis.term\
+\
+local gfx = {\
+    available = false,\
+    backend = \"none\",\
+    owner = nil,\
+}\
+k.graphics = gfx\
+\
+local textPalette = {\
+    [0x1] = 0xFFFFFF,\
+    [0x2] = 0xFF0000,\
+    [0x4] = 0x00FF00,\
+    [0x8] = 0x0000FF,\
+    [0x10] = 0x00FFFF,\
+    [0x20] = 0xFF00FF,\
+    [0x40] = 0xFFFF00,\
+    [0x80] = 0xFF6D00,\
+    [0x100] = 0x6DFF55,\
+    [0x200] = 0x24FFFF,\
+    [0x400] = 0x924900,\
+    [0x800] = 0x6D6D55,\
+    [0x1000] = 0xDBDBAA,\
+    [0x2000] = 0x6D00FF,\
+    [0x4000] = 0xB6FF00,\
+    [0x8000] = 0x000000,\
+}\
+\
+local function has(name)\
+    return term and type(term[name]) == \"function\"\
+end\
+\
+local function call(name, ...)\
+    if not has(name) then\
+        error(\"ENOSYS: graphics backend does not support \" .. name)\
+    end\
+    return term[name](...)\
+end\
+\
+local function currentPid()\
+    return k.currentTask and k.currentTask.pid or 0\
+end\
+\
+local function currentEuid()\
+    local task = k.currentTask\
+    return task and (task.euid or task.uid) or k.uid or 0\
+end\
+\
+local function ownerAlive()\
+    if gfx.owner == nil then\
+        return false\
+    end\
+    local task = k.tasks and k.tasks[tostring(gfx.owner)]\
+    return task and task.status ~= \"Z\"\
+end\
+\
+local function requireGraphics()\
+    if not gfx.available then\
+        error(\"ENODEV: pixel graphics API is not available\")\
+    end\
+end\
+\
+local function requireOwner()\
+    requireGraphics()\
+    if not ownerAlive() then\
+        gfx.owner = nil\
+    end\
+    if gfx.owner ~= currentPid() and currentEuid() ~= 0 then\
+        error(\"EPERM: framebuffer is owned by pid \" .. tostring(gfx.owner))\
+    end\
+end\
+\
+local function copyArray(t)\
+    if type(t) ~= \"table\" then\
+        return t\
+    end\
+    local out = {}\
+    for i = 1, #t do\
+        out[i] = t[i]\
+    end\
+    return out\
+end\
+\
+local function detect()\
+    if has(\"setGraphicsMode\") and has(\"getGraphicsMode\") then\
+        gfx.available = true\
+        gfx.backend = \"term.graphics\"\
+    elseif has(\"setPixel\") and has(\"getPixel\") then\
+        gfx.available = true\
+        gfx.backend = \"term.pixel\"\
+    else\
+        gfx.available = false\
+        gfx.backend = \"none\"\
+    end\
+end\
+\
+local function getSizeForMode(mode)\
+    if has(\"getSize\") then\
+        if mode ~= nil then\
+            local ok, w, h = pcall(call, \"getSize\", mode)\
+            if ok and w and h then\
+                return w, h\
+            end\
+        end\
+        return call(\"getSize\")\
+    end\
+    error(\"ENOSYS: graphics backend does not support getSize\")\
+end\
+\
+detect()\
+\
+sys[\"gfx_info\"] = function()\
+    detect()\
+    local info = {\
+        available = gfx.available,\
+        backend = gfx.backend,\
+        owner = ownerAlive() and gfx.owner or nil,\
+        mode = nil,\
+        width = nil,\
+        height = nil,\
+        frozen = nil,\
+        functions = {},\
+    }\
+    if gfx.available then\
+        if has(\"getGraphicsMode\") then\
+            info.mode = call(\"getGraphicsMode\")\
+        end\
+        if has(\"getSize\") then\
+            local sizeMode = info.mode\
+            if sizeMode == nil or sizeMode == false then\
+                sizeMode = true\
+            end\
+            local w, h = getSizeForMode(sizeMode)\
+            info.width, info.height = w, h\
+            local tw, th = getSizeForMode(false)\
+            info.textWidth, info.textHeight = tw, th\
+        end\
+        if has(\"getFrozen\") then\
+            info.frozen = call(\"getFrozen\")\
+        end\
+    end\
+    for _, name in ipairs({\
+        \"setGraphicsMode\",\
+        \"getGraphicsMode\",\
+        \"setPixel\",\
+        \"getPixel\",\
+        \"drawPixels\",\
+        \"getPixels\",\
+        \"setFrozen\",\
+        \"getFrozen\",\
+        \"screenshot\",\
+        \"setVisible\",\
+        \"setPaletteColor\",\
+        \"getPaletteColor\",\
+    }) do\
+        info.functions[name] = has(name)\
+    end\
+    return info\
+end\
+\
+sys[\"gfx_acquire\"] = function(force)\
+    requireGraphics()\
+    if not ownerAlive() then\
+        gfx.owner = nil\
+    end\
+    local pid = currentPid()\
+    if gfx.owner and gfx.owner ~= pid then\
+        if force and currentEuid() == 0 then\
+            gfx.owner = pid\
+        else\
+            error(\"EBUSY: framebuffer is owned by pid \" .. tostring(gfx.owner))\
+        end\
+    else\
+        gfx.owner = pid\
+    end\
+    return true, gfx.owner\
+end\
+\
+sys[\"gfx_release\"] = function()\
+    requireGraphics()\
+    local pid = currentPid()\
+    if gfx.owner == pid or currentEuid() == 0 then\
+        gfx.owner = nil\
+        return true\
+    end\
+    error(\"EPERM: framebuffer is owned by pid \" .. tostring(gfx.owner))\
+end\
+\
+sys[\"gfx_owner\"] = function()\
+    if not ownerAlive() then\
+        gfx.owner = nil\
+    end\
+    return gfx.owner\
+end\
+\
+sys[\"gfx_set_mode\"] = function(mode)\
+    requireOwner()\
+    if has(\"setGraphicsMode\") then\
+        local value = mode\
+        if value == nil then\
+            value = false\
+        end\
+        return call(\"setGraphicsMode\", value)\
+    end\
+    return true\
+end\
+\
+sys[\"gfx_get_mode\"] = function()\
+    requireGraphics()\
+    if has(\"getGraphicsMode\") then\
+        return call(\"getGraphicsMode\")\
+    end\
+    return true\
+end\
+\
+sys[\"gfx_get_size\"] = function()\
+    requireGraphics()\
+    local mode\
+    if has(\"getGraphicsMode\") then\
+        mode = call(\"getGraphicsMode\")\
+    end\
+    if mode == nil or mode == false then\
+        mode = true\
+    end\
+    return getSizeForMode(mode)\
+end\
+\
+sys[\"gfx_clear\"] = function(color)\
+    requireOwner()\
+    if has(\"clear\") then\
+        if color ~= nil and has(\"setBackgroundColor\") then\
+            pcall(call, \"setBackgroundColor\", color)\
+        end\
+        return call(\"clear\")\
+    end\
+    if has(\"drawPixels\") and has(\"getSize\") then\
+        local w, h = sys[\"gfx_get_size\"]()\
+        return call(\"drawPixels\", 0, 0, color or 0, w, h)\
+    end\
+    error(\"ENOSYS: graphics backend does not support clear\")\
+end\
+\
+sys[\"gfx_set_pixel\"] = function(x, y, color)\
+    requireOwner()\
+    x, y, color = tonumber(x), tonumber(y), tonumber(color)\
+    if not x or not y or not color then\
+        error(\"EINVAL: expected x, y, color\")\
+    end\
+    return call(\"setPixel\", x, y, color)\
+end\
+\
+sys[\"gfx_get_pixel\"] = function(x, y)\
+    requireGraphics()\
+    x, y = tonumber(x), tonumber(y)\
+    if not x or not y then\
+        error(\"EINVAL: expected x, y\")\
+    end\
+    return call(\"getPixel\", x, y)\
+end\
+\
+sys[\"gfx_draw_pixels\"] = function(x, y, pixels, width, height)\
+    requireOwner()\
+    x, y = tonumber(x), tonumber(y)\
+    if not x or not y then\
+        error(\"EINVAL: expected x, y\")\
+    end\
+    if type(pixels) == \"number\" then\
+        width, height = tonumber(width), tonumber(height)\
+        if not width or not height then\
+            error(\"EINVAL: solid fill requires width and height\")\
+        end\
+        return call(\"drawPixels\", x, y, pixels, width, height)\
+    end\
+    if type(pixels) ~= \"table\" and type(pixels) ~= \"string\" then\
+        error(\"EINVAL: expected pixels table, string, or fill color\")\
+    end\
+    return call(\"drawPixels\", x, y, pixels, width, height)\
+end\
+\
+sys[\"gfx_get_pixels\"] = function(x, y, width, height)\
+    requireGraphics()\
+    x, y = tonumber(x), tonumber(y)\
+    width, height = tonumber(width), tonumber(height)\
+    if not x or not y or not width or not height then\
+        error(\"EINVAL: expected x, y, width, height\")\
+    end\
+    return copyArray(call(\"getPixels\", x, y, width, height))\
+end\
+\
+sys[\"gfx_set_frozen\"] = function(frozen)\
+    requireOwner()\
+    return call(\"setFrozen\", frozen and true or false)\
+end\
+\
+sys[\"gfx_get_frozen\"] = function()\
+    requireGraphics()\
+    return call(\"getFrozen\")\
+end\
+\
+sys[\"gfx_present\"] = function()\
+    requireOwner()\
+    if has(\"setFrozen\") then\
+        call(\"setFrozen\", false)\
+    end\
+    return true\
+end\
+\
+sys[\"gfx_set_palette\"] = function(index, color)\
+    requireOwner()\
+    index, color = tonumber(index), tonumber(color)\
+    if not index or not color then\
+        error(\"EINVAL: expected index, color\")\
+    end\
+    return call(\"setPaletteColor\", index, color)\
+end\
+\
+sys[\"gfx_restore_palette\"] = function()\
+    requireOwner()\
+    if not has(\"setPaletteColor\") then\
+        error(\"ENOSYS: graphics backend does not support setPaletteColor\")\
+    end\
+    if has(\"getGraphicsMode\") and call(\"getGraphicsMode\") ~= 0 and call(\"getGraphicsMode\") ~= false then\
+        call(\"setGraphicsMode\", false)\
+    end\
+    for index, color in pairs(textPalette) do\
+        call(\"setPaletteColor\", index, color)\
+    end\
+    return true\
+end\
+\
+sys[\"gfx_get_palette\"] = function(index)\
+    requireGraphics()\
+    index = tonumber(index)\
+    if not index then\
+        error(\"EINVAL: expected index\")\
+    end\
+    return call(\"getPaletteColor\", index)\
+end\
+\
+sys[\"gfx_screenshot\"] = function()\
+    requireGraphics()\
+    return call(\"screenshot\")\
+end\
+\
+sys[\"gfx_set_visible\"] = function(visible)\
+    requireOwner()\
+    return call(\"setVisible\", visible and true or false)\
+end\
+\
+if gfx.available then\
+    k.log(\"Graphics module loaded (\" .. gfx.backend .. \")\", \"INFO\", 0x00FFFF)\
+else\
+    k.log(\"Graphics module loaded without pixel backend\", \"WARN\", 0xFF8800)\
+end\
+",
+    },
+    {
+      checksum = "sha256:2ff8bc826c1857bd64a886a1a9a10ccfd426c3caac0cbe43f90461b302197bb3:5831",
+      path = "/lib/modules/hyperion/53_input.kmod",
+      text = "local k = ...\
+local sys = k.syscalls\
+local keys = k.apis and k.apis.keys or {}\
+\
+local input = {\
+    mouse = {\
+        x = 0,\
+        y = 0,\
+        button = 0,\
+        down = false,\
+        queue = {},\
+        max = 128,\
+        enabled = true,\
+    },\
+    key = {\
+        pressed = {},\
+        queue = {},\
+        max = 128,\
+        enabled = true,\
+        ctrl = false,\
+        alt = false,\
+        shift = false,\
+    },\
+}\
+k.input = input\
+\
+local mouseEvents = {\
+    mouse_click = true,\
+    mouse_drag = true,\
+    mouse_up = true,\
+    mouse_scroll = true,\
+    monitor_touch = true,\
+}\
+\
+local keyEvents = {\
+    keyPressed = true,\
+    keyReleased = true,\
+    keyTyped = true,\
+}\
+\
+local oldGetMachineEvent = k.EFI.getMachineEvent\
+\
+local function push(queue, max, event)\
+    queue[#queue + 1] = event\
+    while #queue > max do\
+        table.remove(queue, 1)\
+    end\
+end\
+\
+local function keyName(code)\
+    if type(keys.getName) == \"function\" then\
+        local ok, name = pcall(keys.getName, code)\
+        if ok and name then\
+            return name\
+        end\
+    end\
+    return tostring(code)\
+end\
+\
+local function keyDown(code)\
+    return code and input.key.pressed[code] and true or false\
+end\
+\
+local function updateModifiers()\
+    input.key.ctrl = keyDown(keys.leftCtrl) or keyDown(keys.rightCtrl)\
+    input.key.alt = keyDown(keys.leftAlt) or keyDown(keys.rightAlt)\
+    input.key.shift = keyDown(keys.leftShift) or keyDown(keys.rightShift)\
+end\
+\
+local function modifierSnapshot()\
+    return {\
+        ctrl = input.key.ctrl,\
+        alt = input.key.alt,\
+        shift = input.key.shift,\
+    }\
+end\
+\
+local function recordMouse(name, ...)\
+    if not input.mouse.enabled or not mouseEvents[name] then\
+        return\
+    end\
+    local event = { type = name, time = k.EFI:getEpochMs() }\
+    if name == \"monitor_touch\" then\
+        local side, x, y = ...\
+        event.side = side\
+        event.x = tonumber(x) or 0\
+        event.y = tonumber(y) or 0\
+        event.button = 1\
+        event.down = true\
+    elseif name == \"mouse_scroll\" then\
+        local direction, x, y = ...\
+        event.direction = tonumber(direction) or 0\
+        event.x = tonumber(x) or 0\
+        event.y = tonumber(y) or 0\
+    else\
+        local button, x, y = ...\
+        event.button = tonumber(button) or 0\
+        event.x = tonumber(x) or 0\
+        event.y = tonumber(y) or 0\
+        event.down = name ~= \"mouse_up\"\
+    end\
+    input.mouse.x = event.x or input.mouse.x\
+    input.mouse.y = event.y or input.mouse.y\
+    input.mouse.button = event.button or input.mouse.button\
+    input.mouse.down = event.down or false\
+    push(input.mouse.queue, input.mouse.max, event)\
+end\
+\
+local function recordKey(name, ...)\
+    if not input.key.enabled or not keyEvents[name] then\
+        return\
+    end\
+\
+    local computer, value, held = ...\
+    local event = {\
+        time = k.EFI:getEpochMs(),\
+        computer = computer,\
+    }\
+\
+    if name == \"keyPressed\" then\
+        local code = tonumber(value)\
+        input.key.pressed[code] = true\
+        updateModifiers()\
+        event.type = \"key_down\"\
+        event.key = code\
+        event.name = keyName(code)\
+        event.held = held and true or false\
+        event.mod = modifierSnapshot()\
+    elseif name == \"keyReleased\" then\
+        local code = tonumber(value)\
+        input.key.pressed[code] = nil\
+        updateModifiers()\
+        event.type = \"key_up\"\
+        event.key = code\
+        event.name = keyName(code)\
+        event.mod = modifierSnapshot()\
+    elseif name == \"keyTyped\" then\
+        updateModifiers()\
+        event.type = \"char\"\
+        event.char = value\
+        event.mod = modifierSnapshot()\
+    else\
+        return\
+    end\
+\
+    push(input.key.queue, input.key.max, event)\
+end\
+\
+local function record(name, ...)\
+    if mouseEvents[name] then\
+        recordMouse(name, ...)\
+    elseif keyEvents[name] then\
+        recordKey(name, ...)\
+    end\
+end\
+\
+k.EFI.getMachineEvent = function(...)\
+    local event = { oldGetMachineEvent(...) }\
+    if event[1] then\
+        record(table.unpack(event))\
+    end\
+    return table.unpack(event)\
+end\
+\
+sys[\"input_mouse_state\"] = function()\
+    return {\
+        x = input.mouse.x,\
+        y = input.mouse.y,\
+        button = input.mouse.button,\
+        down = input.mouse.down,\
+        queued = #input.mouse.queue,\
+        enabled = input.mouse.enabled,\
+    }\
+end\
+\
+sys[\"input_mouse_poll\"] = function()\
+    if #input.mouse.queue == 0 then\
+        return nil\
+    end\
+    return table.remove(input.mouse.queue, 1)\
+end\
+\
+sys[\"input_mouse_peek\"] = function()\
+    return input.mouse.queue[1]\
+end\
+\
+sys[\"input_mouse_clear\"] = function()\
+    input.mouse.queue = {}\
+    return true\
+end\
+\
+sys[\"input_mouse_enable\"] = function(enabled)\
+    input.mouse.enabled = enabled and true or false\
+    return input.mouse.enabled\
+end\
+\
+sys[\"input_key_state\"] = function()\
+    local pressed = {}\
+    for code in pairs(input.key.pressed) do\
+        pressed[#pressed + 1] = {\
+            key = code,\
+            name = keyName(code),\
+        }\
+    end\
+    return {\
+        pressed = pressed,\
+        ctrl = input.key.ctrl,\
+        alt = input.key.alt,\
+        shift = input.key.shift,\
+        queued = #input.key.queue,\
+        enabled = input.key.enabled,\
+    }\
+end\
+\
+sys[\"input_key_poll\"] = function()\
+    if #input.key.queue == 0 then\
+        return nil\
+    end\
+    return table.remove(input.key.queue, 1)\
+end\
+\
+sys[\"input_key_peek\"] = function()\
+    return input.key.queue[1]\
+end\
+\
+sys[\"input_key_clear\"] = function()\
+    input.key.queue = {}\
+    return true\
+end\
+\
+sys[\"input_key_enable\"] = function(enabled)\
+    input.key.enabled = enabled and true or false\
+    return input.key.enabled\
+end\
+\
+sys[\"input_key_down\"] = function(key)\
+    key = tonumber(key)\
+    if not key then\
+        return false\
+    end\
+    return keyDown(key)\
+end\
+\
+k.log(\"Input module loaded (mouse + keyboard queues)\", \"INFO\", 0x00FFFF)\
+",
+    },
+    {
+      checksum = "sha256:3b5cbf76e5c6bb617bfea02cc536d8ab1f095d0e2e18d9cb436006f47a1b8d62:432",
+      path = "/lib/modules/hyperion/55_time.kmod",
+      text = "local k = ...\
+local sys = k.syscalls\
+\
+sys[\"world_time\"] = function()\
+    local osApi = k.apis and k.apis.os\
+    if type(osApi) == \"table\" and type(osApi.time) == \"function\" then\
+        local ok, time = pcall(osApi.time, \"ingame\")\
+        if ok and type(time) == \"number\" then\
+            return time\
+        end\
+        return osApi.time()\
+    end\
+    error(\"ENOSYS: world time unavailable\")\
+end\
+\
+k.log(\"World time module loaded\")\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-gfx-kernel",
+  version = "0.1.0",
+}

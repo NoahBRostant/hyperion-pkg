@@ -1,0 +1,536 @@
+return {
+  depends = {
+    "hyperion-gfx-kernel",
+  },
+  description = "Graphics/input userspace wrappers and diagnostic tools.",
+  files = {
+    {
+      checksum = "sha256:cfda1edb30eb095d03f5930a857b2a50bc2bcc12f7fcee9e3d6cb418bb2e29af:1473",
+      mode = 954,
+      path = "/bin/gfxdiag",
+      text = "local function dump(label, fn)\
+    local ok, a, b, c = pcall(fn)\
+    if ok then\
+        print(label .. \": \" .. tostring(a) .. (b ~= nil and (\"x\" .. tostring(b)) or \"\") .. (c ~= nil and (\" \" .. tostring(c)) or \"\"))\
+    else\
+        print(label .. \": error: \" .. tostring(a))\
+    end\
+end\
+\
+local function firstLine(value)\
+    return tostring(value):match(\"^[^\\n]*\") or tostring(value)\
+end\
+\
+local info = syscall.gfx_info()\
+print(\"available: \" .. tostring(info.available))\
+print(\"backend:   \" .. tostring(info.backend))\
+print(\"mode:      \" .. tostring(info.mode))\
+print(\"owner:     \" .. tostring(info.owner or \"none\"))\
+print(\"gfx size:  \" .. tostring(info.width) .. \"x\" .. tostring(info.height))\
+if info.textWidth and info.textHeight then\
+    print(\"text size: \" .. tostring(info.textWidth) .. \"x\" .. tostring(info.textHeight))\
+end\
+\
+local ok = pcall(syscall.gfx_acquire, true)\
+if not ok then\
+    print(\"acquire: failed\")\
+    syscall.exit(1)\
+end\
+\
+dump(\"size default gfx\", syscall.gfx_get_size)\
+\
+for _, mode in ipairs({ true, 1, 2 }) do\
+    local setOk, err = pcall(syscall.gfx_set_mode, mode)\
+    if setOk then\
+        dump(\"size mode \" .. tostring(mode), syscall.gfx_get_size)\
+        dump(\"frozen mode \" .. tostring(mode), syscall.gfx_get_frozen)\
+    else\
+        print(\"mode \" .. tostring(mode) .. \": error: \" .. firstLine(err))\
+    end\
+end\
+\
+pcall(syscall.gfx_set_frozen, false)\
+pcall(syscall.gfx_set_mode, false)\
+pcall(syscall.gfx_restore_palette)\
+pcall(syscall.gfx_release)\
+",
+    },
+    {
+      checksum = "sha256:6aa21c6edb432d9e47aa9f915cf457cbbd49999da2923807958445a2b1c0f911:654",
+      mode = 954,
+      path = "/bin/gfxinfo",
+      text = "local info = syscall.gfx_info()\
+\
+print(\"Graphics: \" .. (info.available and \"available\" or \"unavailable\"))\
+print(\"Backend:  \" .. tostring(info.backend))\
+print(\"Owner:    \" .. tostring(info.owner or \"none\"))\
+\
+if info.available then\
+    print(\"Mode:     \" .. tostring(info.mode))\
+    print(\"Size:     \" .. tostring(info.width) .. \"x\" .. tostring(info.height))\
+    print(\"Frozen:   \" .. tostring(info.frozen))\
+end\
+\
+print(\"\")\
+print(\"Functions:\")\
+local names = {}\
+for name in pairs(info.functions or {}) do\
+    names[#names + 1] = name\
+end\
+table.sort(names)\
+for _, name in ipairs(names) do\
+    print(\"  \" .. name .. \": \" .. tostring(info.functions[name]))\
+end\
+",
+    },
+    {
+      checksum = "sha256:7b4104fc8f3690b814fd9215dd8541c4ccef20dfed5c58721305e9e734402e47:378",
+      mode = 954,
+      path = "/bin/gfxreset",
+      text = "local ok, err = pcall(function()\
+    syscall.gfx_acquire(true)\
+    pcall(syscall.gfx_set_frozen, false)\
+    pcall(syscall.gfx_set_visible, true)\
+    pcall(syscall.gfx_set_mode, false)\
+    pcall(syscall.gfx_restore_palette)\
+    syscall.gfx_release()\
+end)\
+\
+if not ok then\
+    print(\"gfxreset: \" .. tostring(err))\
+    syscall.exit(1)\
+end\
+\
+print(\"gfxreset: terminal mode restored\")\
+",
+    },
+    {
+      checksum = "sha256:f35a5ff1d4f905649ad1def113d6c32b830924474717c22749ae783c248c4f39:1789",
+      mode = 954,
+      path = "/bin/gfxtest",
+      text = "local gfx = require(\"gfx\")\
+\
+local running = true\
+pcall(syscall.sigcatch, function(sig)\
+    if sig == 1 then\
+        running = false\
+    end\
+end)\
+\
+local function frame(t)\
+    local width, height = gfx.size()\
+    gfx.freeze(true)\
+\
+    local band = math.max(1, math.floor(height / #gfx.palette))\
+    for i = 1, #gfx.palette do\
+        local y = (i - 1) * band\
+        local h = i == #gfx.palette and (height - y) or band\
+        gfx.rect(0, y, width, h, i - 1)\
+    end\
+\
+    local margin = math.max(4, math.floor(math.min(width, height) / 12))\
+    gfx.rect(margin, margin, width - margin * 2, height - margin * 2, 0)\
+    gfx.rect(margin + 2, margin + 2, width - margin * 2 - 4, height - margin * 2 - 4, 1)\
+\
+    local boxW = math.max(12, math.floor(width / 5))\
+    local boxH = math.max(8, math.floor(height / 5))\
+    local travelX = math.max(1, width - boxW - margin * 2)\
+    local travelY = math.max(1, height - boxH - margin * 2)\
+    local x = margin + (t * 5 % travelX)\
+    local y = margin + (t * 3 % travelY)\
+\
+    gfx.rect(x, y, boxW, boxH, 4)\
+    gfx.rect(x + 2, y + 2, boxW - 4, boxH - 4, 1)\
+    gfx.rect(x + 5, y + 5, math.max(2, boxW - 10), math.max(2, boxH - 10), 5)\
+\
+    local cx = math.floor(width / 2)\
+    local cy = math.floor(height / 2)\
+    local radius = math.min(16, math.floor(math.min(width, height) / 5))\
+    gfx.line(cx - radius, cy, cx + radius, cy, 9)\
+    gfx.line(cx, cy - radius, cx, cy + radius, 9)\
+\
+    gfx.present()\
+end\
+\
+local ok, err = xpcall(function()\
+    gfx.open(2)\
+    for t = 0, 120 do\
+        if not running then\
+            break\
+        end\
+        frame(t)\
+        sleep(0.05)\
+    end\
+end, debug.traceback)\
+\
+gfx.close()\
+pcall(syscall.sigignore)\
+\
+if not ok then\
+    print(\"gfxtest: \" .. tostring(err))\
+    syscall.exit(1)\
+end\
+\
+print(\"gfxtest: complete\")\
+",
+    },
+    {
+      checksum = "sha256:a661c358fe7ff0af87ee0786ecd034336c56e9d9ddb7098f8ec61ac27011c79d:1268",
+      mode = 954,
+      path = "/bin/keydiag",
+      text = "local input = require(\"input\")\
+\
+print(\"Keyboard capture diagnostic\")\
+print(\"Press keys. Press Ctrl+C to stop.\")\
+input.clearKeys()\
+\
+local running = true\
+pcall(syscall.sigcatch, function(sig)\
+    if sig == 1 then\
+        running = false\
+    end\
+end)\
+\
+local function modText(mod)\
+    mod = mod or {}\
+    local out = {}\
+    if mod.ctrl then\
+        out[#out + 1] = \"ctrl\"\
+    end\
+    if mod.alt then\
+        out[#out + 1] = \"alt\"\
+    end\
+    if mod.shift then\
+        out[#out + 1] = \"shift\"\
+    end\
+    if #out == 0 then\
+        return \"-\"\
+    end\
+    return table.concat(out, \"+\")\
+end\
+\
+while running do\
+    local event = input.pollKey()\
+    if event then\
+        if event.type == \"char\" then\
+            print(tostring(event.time) .. \" char char=\" .. string.format(\"%q\", event.char or \"\") .. \" mod=\" .. modText(event.mod))\
+        else\
+            print(\
+                tostring(event.time)\
+                .. \" \" .. tostring(event.type)\
+                .. \" key=\" .. tostring(event.key)\
+                .. \" name=\" .. tostring(event.name)\
+                .. \" held=\" .. tostring(event.held or false)\
+                .. \" mod=\" .. modText(event.mod)\
+            )\
+        end\
+    else\
+        sleep(0.05)\
+    end\
+end\
+\
+pcall(syscall.sigignore)\
+print(\"keydiag: stopped\")\
+",
+    },
+    {
+      checksum = "sha256:db3e06a7c9baac5aa6c1b25df5358186f34a4e73de169035872bd9e44609d1b6:1040",
+      mode = 954,
+      path = "/bin/mousediag",
+      text = "local input = require(\"input\")\
+\
+print(\"Mouse capture diagnostic\")\
+print(\"Move/click/scroll the mouse. Press Ctrl+C to stop.\")\
+input.clearMouse()\
+\
+local running = true\
+pcall(syscall.sigcatch, function(sig)\
+    if sig == 1 then\
+        running = false\
+    end\
+end)\
+\
+while running do\
+    local event = input.pollMouse()\
+    if event then\
+        local parts = {\
+            tostring(event.time),\
+            tostring(event.type),\
+            \"x=\" .. tostring(event.x),\
+            \"y=\" .. tostring(event.y),\
+        }\
+        if event.button then\
+            parts[#parts + 1] = \"button=\" .. tostring(event.button)\
+        end\
+        if event.direction then\
+            parts[#parts + 1] = \"direction=\" .. tostring(event.direction)\
+        end\
+        if event.side then\
+            parts[#parts + 1] = \"side=\" .. tostring(event.side)\
+        end\
+        parts[#parts + 1] = \"down=\" .. tostring(event.down)\
+        print(table.concat(parts, \" \"))\
+    else\
+        sleep(0.05)\
+    end\
+end\
+\
+pcall(syscall.sigignore)\
+print(\"mousediag: stopped\")\
+",
+    },
+    {
+      checksum = "sha256:c7f49e84ab672e71413fd268f901bc5924833b8445d8d266da4827cd4bd134b0:4125",
+      path = "/usr/lib/gfx.lua",
+      text = "local gfx = {}\
+\
+gfx.palette = {\
+    0x000000,\
+    0x1E1E2E,\
+    0x313244,\
+    0x45475A,\
+    0x89B4FA,\
+    0xA6E3A1,\
+    0xF9E2AF,\
+    0xF38BA8,\
+    0xCBA6F7,\
+    0xFFFFFF,\
+}\
+\
+gfx.mode = 2\
+gfx.opened = false\
+gfx.width = 0\
+gfx.height = 0\
+\
+local function checkOpen()\
+    if not gfx.opened then\
+        error(\"gfx: not open\", 2)\
+    end\
+end\
+\
+local function clampRect(x, y, w, h)\
+    checkOpen()\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    w = math.floor(tonumber(w) or 0)\
+    h = math.floor(tonumber(h) or 0)\
+    if x < 0 then\
+        w = w + x\
+        x = 0\
+    end\
+    if y < 0 then\
+        h = h + y\
+        y = 0\
+    end\
+    if x + w > gfx.width then\
+        w = gfx.width - x\
+    end\
+    if y + h > gfx.height then\
+        h = gfx.height - y\
+    end\
+    if w <= 0 or h <= 0 then\
+        return nil\
+    end\
+    return x, y, w, h\
+end\
+\
+function gfx.available()\
+    local info = syscall.gfx_info()\
+    return info and info.available, info\
+end\
+\
+function gfx.open(mode, palette)\
+    local ok, info = gfx.available()\
+    if not ok then\
+        error(\"gfx: graphics API is not available\", 2)\
+    end\
+    syscall.gfx_acquire()\
+    gfx.opened = true\
+    gfx.mode = mode or gfx.mode\
+    syscall.gfx_set_mode(gfx.mode)\
+    if palette ~= false then\
+        gfx.setPalette(palette or gfx.palette)\
+    end\
+    gfx.width, gfx.height = syscall.gfx_get_size()\
+    return gfx.width, gfx.height, info\
+end\
+\
+function gfx.close()\
+    if not gfx.opened then\
+        return true\
+    end\
+    pcall(syscall.gfx_set_frozen, false)\
+    pcall(syscall.gfx_set_mode, false)\
+    pcall(syscall.gfx_restore_palette)\
+    pcall(syscall.gfx_release)\
+    gfx.opened = false\
+    gfx.width, gfx.height = 0, 0\
+    return true\
+end\
+\
+function gfx.reset()\
+    syscall.gfx_acquire(true)\
+    gfx.opened = true\
+    pcall(syscall.gfx_set_frozen, false)\
+    pcall(syscall.gfx_set_mode, false)\
+    pcall(syscall.gfx_restore_palette)\
+    pcall(syscall.gfx_release)\
+    gfx.opened = false\
+    gfx.width, gfx.height = 0, 0\
+    return true\
+end\
+\
+function gfx.size()\
+    checkOpen()\
+    return gfx.width, gfx.height\
+end\
+\
+function gfx.freeze(value)\
+    checkOpen()\
+    return syscall.gfx_set_frozen(value and true or false)\
+end\
+\
+function gfx.present()\
+    checkOpen()\
+    return syscall.gfx_present()\
+end\
+\
+function gfx.setPalette(palette)\
+    checkOpen()\
+    for i, rgb in ipairs(palette) do\
+        syscall.gfx_set_palette(i - 1, rgb)\
+    end\
+end\
+\
+function gfx.restorePalette()\
+    checkOpen()\
+    return syscall.gfx_restore_palette()\
+end\
+\
+function gfx.clear(color)\
+    checkOpen()\
+    return syscall.gfx_clear(color or 0)\
+end\
+\
+function gfx.pixel(x, y, color)\
+    checkOpen()\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    if x < 0 or y < 0 or x >= gfx.width or y >= gfx.height then\
+        return false\
+    end\
+    syscall.gfx_set_pixel(x, y, color or 0)\
+    return true\
+end\
+\
+function gfx.rect(x, y, w, h, color)\
+    local rx, ry, rw, rh = clampRect(x, y, w, h)\
+    if not rx then\
+        return false\
+    end\
+    syscall.gfx_draw_pixels(rx, ry, color or 0, rw, rh)\
+    return true\
+end\
+\
+function gfx.frame(x, y, w, h, color)\
+    gfx.rect(x, y, w, 1, color)\
+    gfx.rect(x, y + h - 1, w, 1, color)\
+    gfx.rect(x, y, 1, h, color)\
+    gfx.rect(x + w - 1, y, 1, h, color)\
+end\
+\
+function gfx.line(x1, y1, x2, y2, color)\
+    checkOpen()\
+    x1, y1 = math.floor(x1), math.floor(y1)\
+    x2, y2 = math.floor(x2), math.floor(y2)\
+    local dx = math.abs(x2 - x1)\
+    local sx = x1 < x2 and 1 or -1\
+    local dy = -math.abs(y2 - y1)\
+    local sy = y1 < y2 and 1 or -1\
+    local err = dx + dy\
+    while true do\
+        gfx.pixel(x1, y1, color)\
+        if x1 == x2 and y1 == y2 then\
+            break\
+        end\
+        local e2 = 2 * err\
+        if e2 >= dy then\
+            err = err + dy\
+            x1 = x1 + sx\
+        end\
+        if e2 <= dx then\
+            err = err + dx\
+            y1 = y1 + sy\
+        end\
+    end\
+end\
+\
+function gfx.with(fn, mode, palette)\
+    gfx.open(mode, palette)\
+    local ok, err = xpcall(fn, debug.traceback, gfx)\
+    gfx.close()\
+    if not ok then\
+        error(err, 2)\
+    end\
+end\
+\
+return gfx\
+",
+    },
+    {
+      checksum = "sha256:84ca7860f6d7db0e59eff88eecb0ac0ee2d50bf3937a61d680d2445eaab9d1d1:829",
+      path = "/usr/lib/input.lua",
+      text = "local input = {}\
+\
+function input.mouseState()\
+    return syscall.input_mouse_state()\
+end\
+\
+function input.pollMouse()\
+    return syscall.input_mouse_poll()\
+end\
+\
+function input.peekMouse()\
+    return syscall.input_mouse_peek()\
+end\
+\
+function input.clearMouse()\
+    return syscall.input_mouse_clear()\
+end\
+\
+function input.enableMouse(enabled)\
+    return syscall.input_mouse_enable(enabled)\
+end\
+\
+function input.keyState()\
+    return syscall.input_key_state()\
+end\
+\
+function input.pollKey()\
+    return syscall.input_key_poll()\
+end\
+\
+function input.peekKey()\
+    return syscall.input_key_peek()\
+end\
+\
+function input.clearKeys()\
+    return syscall.input_key_clear()\
+end\
+\
+function input.enableKeys(enabled)\
+    return syscall.input_key_enable(enabled)\
+end\
+\
+function input.keyDown(key)\
+    return syscall.input_key_down(key)\
+end\
+\
+return input\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-gfx-userspace",
+  version = "0.1.0",
+}

@@ -1,0 +1,4386 @@
+return {
+  depends = {
+    "hyperion-gfx-userspace",
+    "hyperion-pty",
+    "hyperion-fileops",
+    "hyperion-gsh-plus",
+  },
+  description = "Keyboard-centric graphical tiling workspace, compositor and core apps.",
+  files = {
+    {
+      checksum = "sha256:1a913aeb3bf5d529b4833d6906fd37970323f98a9f9c1016e248ec8b0db082ff:6418",
+      mode = 954,
+      path = "/bin/hywm",
+      text = "local gfx = require(\"gfx\")\
+local input = require(\"input\")\
+local compositor = require(\"compositor\")\
+local app = require(\"app\")\
+local launcher = require(\"launcher\")\
+local registry = require(\"appregistry\")\
+\
+local palette = {\
+    0x0B1020,\
+    0x111827,\
+    0x1F2937,\
+    0x374151,\
+    0x60A5FA,\
+    0x34D399,\
+    0xFBBF24,\
+    0xF87171,\
+    0xA78BFA,\
+    0xF9FAFB,\
+    0x020617,\
+    0x64748B,\
+}\
+\
+local running = true\
+pcall(syscall.sigcatch, function(sig)\
+    if sig == 1 then\
+        running = false\
+    end\
+end)\
+\
+local state = compositor.new({\
+    gap = 5,\
+    panelHeight = 18,\
+    masterRatio = 0.58,\
+    minWidth = 52,\
+    minHeight = 34,\
+})\
+\
+local launch = launcher.new()\
+\
+local function addWindow(win)\
+    if not win then\
+        return false\
+    end\
+    compositor.add(state, win)\
+    return true\
+end\
+\
+local function launchApp(id, opts)\
+    for _, entry in ipairs(registry.all()) do\
+        if entry.id == id then\
+            return addWindow(registry.launch(entry, opts))\
+        end\
+    end\
+    return false\
+end\
+\
+if type(registry.setLauncher) == \"function\" then\
+    registry.setLauncher(launchApp)\
+end\
+\
+launchApp(\"terminal\")\
+launchApp(\"files\")\
+launchApp(\"monitor\")\
+\
+local function drawBackgroundRect(rect, width, height)\
+    local tile = 18\
+    local startX = math.floor(rect.x / tile) * tile\
+    local startY = math.floor(rect.y / tile) * tile\
+    local endX = math.min(width, rect.x + rect.w)\
+    local endY = math.min(height, rect.y + rect.h)\
+    for y = startY, endY - 1, tile do\
+        for x = startX, endX - 1, tile do\
+            local c = ((math.floor(x / tile) + math.floor(y / tile)) % 2 == 0) and 0 or 1\
+            local rx = math.max(x, rect.x)\
+            local ry = math.max(y, rect.y)\
+            local rw = math.min(x + tile, endX) - rx\
+            local rh = math.min(y + tile, endY) - ry\
+            gfx.rect(rx, ry, rw, rh, c)\
+        end\
+    end\
+end\
+\
+local function focusedWindow()\
+    for _, win in ipairs(compositor.visibleWindows(state)) do\
+        if win.id == state.focused then\
+            return win\
+        end\
+    end\
+    return nil\
+end\
+\
+local function sendAppKey(event)\
+    local win = focusedWindow()\
+    if win and app.key(win, event) then\
+        compositor.damageWindow(state, win)\
+        return true\
+    end\
+    return false\
+end\
+\
+local function handleKey(event)\
+    if launcher.isOpen(launch) then\
+        local consumed, launched = launcher.key(launch, event)\
+        if launched then\
+            addWindow(launched)\
+        end\
+        if consumed then\
+            return true\
+        end\
+    end\
+\
+    if event.type ~= \"key_down\" or event.held then\
+        sendAppKey(event)\
+        return false\
+    end\
+\
+    local name = event.name\
+    local mod = event.mod or {}\
+\
+    if name == \"q\" and mod.ctrl then\
+        running = false\
+        return false\
+    elseif name == \"p\" and mod.ctrl then\
+        launcher.open(launch)\
+        return true\
+    elseif name == \"tab\" then\
+        compositor.focusNext(state, mod.shift and -1 or 1)\
+        return true\
+    elseif name == \"left\" then\
+        local ratio = state.masterRatio\
+        compositor.adjustMaster(state, -0.04)\
+        return state.masterRatio ~= ratio\
+    elseif name == \"right\" then\
+        local ratio = state.masterRatio\
+        compositor.adjustMaster(state, 0.04)\
+        return state.masterRatio ~= ratio\
+    elseif name == \"w\" and mod.ctrl then\
+        local win = focusedWindow()\
+        if win and app.close(win) then\
+            return compositor.remove(state, win.id)\
+        end\
+    else\
+        sendAppKey(event)\
+    end\
+    return false\
+end\
+\
+local function drawDamage(damage)\
+    local width, height = gfx.size()\
+    compositor.layout(state, width, height)\
+    if #damage == 0 then\
+        return\
+    end\
+\
+    local drawPanel = false\
+    local drawWindows = {}\
+    gfx.freeze(true)\
+    for _, rect in ipairs(damage) do\
+        drawBackgroundRect(rect, width, height)\
+        if rect.y < state.panelHeight then\
+            drawPanel = true\
+        end\
+        for _, win in ipairs(compositor.visibleWindows(state)) do\
+            local winRect = compositor.windowRect(win)\
+            if winRect and compositor.rectIntersects(rect, winRect) then\
+                drawWindows[win.id] = true\
+            end\
+        end\
+    end\
+    if drawPanel then\
+        compositor.drawPanel(state, gfx, width)\
+    end\
+    for _, win in ipairs(compositor.visibleWindows(state)) do\
+        if drawWindows[win.id] then\
+            app.render(win)\
+            compositor.drawWindow(gfx, win)\
+        end\
+    end\
+    if launcher.isOpen(launch) then\
+        launcher.render(launch, gfx, width, height)\
+    end\
+    gfx.present()\
+end\
+\
+local ok, err = xpcall(function()\
+    gfx.open(2, palette)\
+    input.clearKeys()\
+    local width, height = gfx.size()\
+    local panelClock = compositor.panelClockLabel()\
+    compositor.layout(state, width, height)\
+    compositor.damageAll(state, width, height)\
+    while running do\
+        local before = nil\
+        local changed = false\
+        local event = input.pollKey()\
+        while event do\
+            if not before then\
+                before = compositor.snapshot(state)\
+            end\
+            if handleKey(event) then\
+                changed = true\
+            end\
+            event = input.pollKey()\
+        end\
+        if changed then\
+            width, height = gfx.size()\
+            compositor.layout(state, width, height)\
+            compositor.damageChanges(state, before, width)\
+            if launch.dirty then\
+                compositor.damageRect(state, launcher.damageRect(launch, width, height))\
+                if not launcher.isOpen(launch) then\
+                    launch.dirty = false\
+                end\
+            end\
+        end\
+        for _, win in ipairs(compositor.visibleWindows(state)) do\
+            if app.tick(win) then\
+                compositor.damageWindow(state, win)\
+            end\
+        end\
+        local nextPanelClock = compositor.panelClockLabel()\
+        if nextPanelClock ~= panelClock then\
+            panelClock = nextPanelClock\
+            width, height = gfx.size()\
+            compositor.damagePanel(state, width)\
+        end\
+        if compositor.hasDamage(state) then\
+            drawDamage(compositor.drainDamage(state))\
+        end\
+        sleep(0.05)\
+    end\
+end, debug.traceback)\
+\
+gfx.close()\
+pcall(syscall.sigignore)\
+\
+if not ok then\
+    print(\"hywm: \" .. tostring(err))\
+    syscall.exit(1)\
+end\
+\
+print(\"hywm: stopped\")\
+",
+    },
+    {
+      checksum = "sha256:932ea65c831a5bfc74ada0ae666d5441d8e85596979c8cf58a92a0a5af6ec141:3198",
+      path = "/usr/lib/app.lua",
+      text = "local surface = require(\"surface\")\
+\
+local app = {}\
+\
+local reserved = {\
+    init = true,\
+    resize = true,\
+    draw = true,\
+    key = true,\
+    close = true,\
+    tick = true,\
+    state = true,\
+    bg = true,\
+}\
+\
+local function context(win)\
+    local protocol = win.app or {}\
+    return {\
+        win = win,\
+        state = protocol.state,\
+        surface = win.surface,\
+        width = win.contentW,\
+        height = win.contentH,\
+        invalidate = function()\
+            win.surfaceDirty = true\
+        end,\
+    }\
+end\
+\
+local function callHook(win, name, ...)\
+    local protocol = win.app\
+    local hook = protocol and protocol[name]\
+    if type(hook) ~= \"function\" then\
+        return nil\
+    end\
+    return hook(context(win), ...)\
+end\
+\
+function app.new(spec)\
+    spec = spec or {}\
+    local win = {}\
+    for key, value in pairs(spec) do\
+        if not reserved[key] then\
+            win[key] = value\
+        end\
+    end\
+    win.title = win.title or \"app\"\
+    win.minWidth = win.minWidth or 44\
+    win.minHeight = win.minHeight or 30\
+    win.bg = spec.bg or win.bg or 1\
+    win.surfaceDirty = true\
+    win.app = {\
+        init = spec.init,\
+        resize = spec.resize,\
+        draw = spec.draw,\
+        key = spec.key,\
+        close = spec.close,\
+        tick = spec.tick,\
+        state = spec.state or {},\
+        started = false,\
+    }\
+    return win\
+end\
+\
+function app.init(win)\
+    if not win or not win.app or win.app.started then\
+        return false\
+    end\
+    win.app.started = true\
+    callHook(win, \"init\")\
+    return true\
+end\
+\
+function app.resize(win, w, h)\
+    w = math.max(1, math.floor(tonumber(w) or 1))\
+    h = math.max(1, math.floor(tonumber(h) or 1))\
+    local changed = false\
+    if not win.surface then\
+        win.surface = surface.new(w, h, win.bg)\
+        changed = true\
+    elseif win.surface.w ~= w or win.surface.h ~= h then\
+        win.surface:resize(w, h, win.bg)\
+        changed = true\
+    end\
+    app.init(win)\
+    if changed then\
+        win.surfaceDirty = true\
+        callHook(win, \"resize\", w, h)\
+    end\
+    return changed\
+end\
+\
+function app.render(win)\
+    app.resize(win, win.contentW, win.contentH)\
+    if not win.surfaceDirty then\
+        return false\
+    end\
+    if not win.surface then\
+        return false\
+    end\
+    if type(win.app.draw) == \"function\" then\
+        callHook(win, \"draw\")\
+    else\
+        win.surface:clear(win.bg)\
+    end\
+    win.surfaceDirty = false\
+    return true\
+end\
+\
+function app.key(win, event)\
+    if not win or not win.app or type(win.app.key) ~= \"function\" then\
+        return false\
+    end\
+    app.init(win)\
+    local changed = callHook(win, \"key\", event)\
+    if changed then\
+        win.surfaceDirty = true\
+        return true\
+    end\
+    return false\
+end\
+\
+function app.close(win)\
+    if not win or not win.app then\
+        return true\
+    end\
+    app.init(win)\
+    local ok = callHook(win, \"close\")\
+    return ok ~= false\
+end\
+\
+function app.tick(win)\
+    if not win or not win.app or type(win.app.tick) ~= \"function\" then\
+        return false\
+    end\
+    app.init(win)\
+    local changed = callHook(win, \"tick\")\
+    if changed then\
+        win.surfaceDirty = true\
+        return true\
+    end\
+    return false\
+end\
+\
+return app\
+",
+    },
+    {
+      checksum = "sha256:c1c61dcff22d0452c88d09ff6f08d8cfe89065f2b9f09c93458423eceab24d3a:2523",
+      path = "/usr/lib/appregistry.lua",
+      text = "local demo = require(\"apps.demo\")\
+local editor = require(\"apps.editor\")\
+local files = require(\"apps.files\")\
+local terminal = require(\"apps.terminal\")\
+\
+local registry = {}\
+local appLauncher = nil\
+\
+local entries = {\
+    {\
+        id = \"terminal\",\
+        name = \"terminal\",\
+        description = \"graphical mini shell\",\
+        color = 4,\
+        create = function()\
+            return terminal.new({ title = \"terminal\" })\
+        end,\
+    },\
+    {\
+        id = \"files\",\
+        name = \"files\",\
+        description = \"keyboard file explorer\",\
+        color = 5,\
+        create = function(opts)\
+            opts = opts or {}\
+            return files.new({\
+                title = opts.title or \"files\",\
+                path = opts.path,\
+                launcher = opts.launcher or appLauncher,\
+            })\
+        end,\
+    },\
+    {\
+        id = \"editor\",\
+        name = \"editor\",\
+        description = \"simple graphical text editor\",\
+        color = 6,\
+        create = function(opts)\
+            opts = opts or {}\
+            return editor.new({ title = \"editor\", path = opts.path })\
+        end,\
+    },\
+    {\
+        id = \"monitor\",\
+        name = \"monitor\",\
+        description = \"demo system monitor\",\
+        color = 8,\
+        create = function()\
+            return demo.new({ title = \"monitor\", color = 8, value = 0.75 })\
+        end,\
+    },\
+    {\
+        id = \"demo\",\
+        name = \"demo\",\
+        description = \"generic ui demo\",\
+        color = 6,\
+        create = function(opts)\
+            opts = opts or {}\
+            return demo.new({\
+                title = opts.title or \"demo\",\
+                color = opts.color or 6,\
+                value = opts.value or 0.35,\
+            })\
+        end,\
+    },\
+}\
+\
+local function contains(haystack, needle)\
+    if needle == \"\" then\
+        return true\
+    end\
+    return string.find(string.lower(haystack or \"\"), needle, 1, true) ~= nil\
+end\
+\
+function registry.all()\
+    return entries\
+end\
+\
+function registry.setLauncher(fn)\
+    appLauncher = fn\
+end\
+\
+function registry.match(query)\
+    query = string.lower(tostring(query or \"\"))\
+    local matches = {}\
+    for _, entry in ipairs(entries) do\
+        if contains(entry.name, query) or contains(entry.id, query) or contains(entry.description, query) then\
+            matches[#matches + 1] = entry\
+        end\
+    end\
+    return matches\
+end\
+\
+function registry.launch(entry, opts)\
+    if not entry or type(entry.create) ~= \"function\" then\
+        return nil\
+    end\
+    return entry.create(opts or {})\
+end\
+\
+return registry\
+",
+    },
+    {
+      checksum = "sha256:5db110a07683f099864a5645837dacfdefffc1acd017a095697f60076f502143:1750",
+      path = "/usr/lib/apps/demo.lua",
+      text = "local app = require(\"app\")\
+local ui = require(\"ui\")\
+\
+local demo = {}\
+\
+local function nextAccent(color)\
+    color = tonumber(color) or 3\
+    color = color + 1\
+    if color > 8 then\
+        color = 3\
+    end\
+    return color\
+end\
+\
+function demo.new(opts)\
+    opts = opts or {}\
+    local accent = opts.color or 4\
+    return app.new({\
+        title = opts.title or \"demo\",\
+        color = accent,\
+        bg = 1,\
+        minWidth = opts.minWidth or 44,\
+        minHeight = opts.minHeight or 30,\
+        state = {\
+            color = accent,\
+            value = opts.value or 0.55,\
+        },\
+        init = function(ctx)\
+            ctx.state.color = ctx.win.color or ctx.state.color\
+        end,\
+        resize = function(ctx)\
+            ctx.invalidate()\
+        end,\
+        draw = function(ctx)\
+            ui.demoLayout(ctx, {\
+                accent = ctx.state.color,\
+                value = ctx.state.value,\
+                bg = 1,\
+                line = 11,\
+            })\
+        end,\
+        key = function(ctx, event)\
+            if event.type == \"key_down\" and not event.held and event.name == \"space\" then\
+                ctx.state.color = nextAccent(ctx.state.color)\
+                return true\
+            end\
+            if event.type == \"key_down\" and not event.held and event.name == \"up\" then\
+                ctx.state.value = math.min(1, ctx.state.value + 0.08)\
+                return true\
+            end\
+            if event.type == \"key_down\" and not event.held and event.name == \"down\" then\
+                ctx.state.value = math.max(0, ctx.state.value - 0.08)\
+                return true\
+            end\
+            return false\
+        end,\
+        close = function()\
+            return true\
+        end,\
+    })\
+end\
+\
+return demo\
+",
+    },
+    {
+      checksum = "sha256:7ce745cb7f9a8c59da3984a357e6f235185f75f97c10e5985c1b4de186cb9b7b:12651",
+      path = "/usr/lib/apps/editor.lua",
+      text = "local app = require(\"app\")\
+local ui = require(\"ui\")\
+\
+local editor = {}\
+\
+local function isBackspaceChar(ch)\
+    local code = ch and ch:byte(1)\
+    return code == 8 or code == 127\
+end\
+\
+local function isPrintableChar(ch)\
+    if type(ch) ~= \"string\" or #ch ~= 1 then\
+        return false\
+    end\
+    local code = ch:byte(1)\
+    return code >= 32 and code <= 126\
+end\
+\
+local function dirname(path)\
+    path = tostring(path or \"\")\
+    local p = path:match(\"^(.*)/[^/]+$\")\
+    if not p or p == \"\" then\
+        return \"/\"\
+    end\
+    return p\
+end\
+\
+local function normalize(path)\
+    path = tostring(path or \"\")\
+    if path == \"\" then\
+        path = \"untitled.txt\"\
+    end\
+    if path:sub(1, 1) ~= \"/\" then\
+        local cwd = \"/\"\
+        if syscall.getcwd then\
+            local ok, value = pcall(syscall.getcwd)\
+            cwd = ok and value or cwd\
+        elseif syscall.getEnviron then\
+            cwd = syscall.getEnviron(\"HOME\") or cwd\
+        end\
+        path = cwd:gsub(\"/$\", \"\") .. \"/\" .. path\
+    end\
+    local parts = {}\
+    for part in path:gmatch(\"[^/]+\") do\
+        if part == \"..\" then\
+            if #parts > 0 then\
+                table.remove(parts)\
+            end\
+        elseif part ~= \".\" and part ~= \"\" then\
+            parts[#parts + 1] = part\
+        end\
+    end\
+    return \"/\" .. table.concat(parts, \"/\")\
+end\
+\
+local function shortError(err)\
+    err = tostring(err or \"unknown error\")\
+    local first = err:match(\"^([^\\n]+)\") or err\
+    local line = first:match(\":%d+:%s*(.+)\")\
+    return line or first\
+end\
+\
+local function fileExists(path)\
+    local ok, t = pcall(syscall.type, path)\
+    return ok and t == \"file\"\
+end\
+\
+local function splitLines(text)\
+    text = tostring(text or \"\")\
+    if text == \"\" then\
+        return { \"\" }\
+    end\
+    local lines = {}\
+    for line in (text .. \"\\n\"):gmatch(\"([^\\n]*)\\n\") do\
+        lines[#lines + 1] = line:gsub(\"\\r$\", \"\")\
+    end\
+    if #lines > 1 and lines[#lines] == \"\" and text:sub(-1) == \"\\n\" then\
+        table.remove(lines)\
+    end\
+    if #lines == 0 then\
+        lines[1] = \"\"\
+    end\
+    return lines\
+end\
+\
+local function loadFile(st)\
+    st.lines = { \"\" }\
+    if not fileExists(st.path) then\
+        st.message = \"new file\"\
+        return true\
+    end\
+    local ok, fd = pcall(syscall.open, st.path, \"r\")\
+    if not ok then\
+        st.message = \"open failed: \" .. shortError(fd)\
+        return false\
+    end\
+    local chunks = {}\
+    while true do\
+        local readOk, data = pcall(syscall.read, fd, 4096)\
+        if not readOk then\
+            pcall(syscall.close, fd)\
+            st.message = \"read failed: \" .. shortError(data)\
+            return false\
+        end\
+        if not data or data == \"\" then\
+            break\
+        end\
+        chunks[#chunks + 1] = data\
+    end\
+    pcall(syscall.close, fd)\
+    st.lines = splitLines(table.concat(chunks))\
+    st.message = \"opened \" .. st.path\
+    return true\
+end\
+\
+local function saveFile(st)\
+    local dir = dirname(st.path)\
+    if dir ~= \"/\" then\
+        local okType, t = pcall(syscall.type, dir)\
+        if not okType or t ~= \"directory\" then\
+            st.message = \"save failed: missing dir\"\
+            return false\
+        end\
+    end\
+    local ok, fd = pcall(syscall.open, st.path, \"w\")\
+    if not ok then\
+        st.message = \"save failed: \" .. shortError(fd)\
+        return false\
+    end\
+    local wrote, why = pcall(syscall.write, fd, table.concat(st.lines, \"\\n\"))\
+    pcall(syscall.close, fd)\
+    if not wrote then\
+        st.message = \"save failed: \" .. shortError(why)\
+        return false\
+    end\
+    st.dirty = false\
+    st.confirmClose = false\
+    st.message = \"saved \" .. st.path\
+    return true\
+end\
+\
+local function clampCursor(st)\
+    if #st.lines == 0 then\
+        st.lines[1] = \"\"\
+    end\
+    st.cy = math.max(1, math.min(st.cy or 1, #st.lines))\
+    local maxX = #(st.lines[st.cy] or \"\") + 1\
+    st.cx = math.max(1, math.min(st.cx or 1, maxX))\
+end\
+\
+local function visibleShape(ctx)\
+    local gutter = ctx.width >= 82 and 22 or 0\
+    local headerH = 15\
+    local footerH = 10\
+    local top = headerH + 1\
+    local left = 5\
+    local textX = left + gutter\
+    local textW = math.max(8, ctx.width - textX - 5)\
+    local rows = math.max(1, math.floor((ctx.height - headerH - footerH - 2) / 7))\
+    local cols = math.max(1, math.floor(textW / 4))\
+    return {\
+        left = left,\
+        top = top,\
+        textX = textX,\
+        textW = textW,\
+        rows = rows,\
+        cols = cols,\
+        gutter = gutter,\
+    }\
+end\
+\
+local function ensureCursor(st, shape)\
+    clampCursor(st)\
+    if st.cy <= st.scrollY then\
+        st.scrollY = st.cy - 1\
+    elseif st.cy > st.scrollY + shape.rows then\
+        st.scrollY = st.cy - shape.rows\
+    end\
+    if st.cx <= st.scrollX then\
+        st.scrollX = st.cx - 1\
+    elseif st.cx > st.scrollX + shape.cols then\
+        st.scrollX = st.cx - shape.cols\
+    end\
+    st.scrollY = math.max(0, st.scrollY or 0)\
+    st.scrollX = math.max(0, st.scrollX or 0)\
+end\
+\
+local function insertText(st, text)\
+    text = tostring(text or \"\")\
+    if text == \"\" then\
+        return false\
+    end\
+    local line = st.lines[st.cy] or \"\"\
+    st.lines[st.cy] = line:sub(1, st.cx - 1) .. text .. line:sub(st.cx)\
+    st.cx = st.cx + #text\
+    st.dirty = true\
+    st.confirmClose = false\
+    st.message = nil\
+    return true\
+end\
+\
+local function newline(st)\
+    local line = st.lines[st.cy] or \"\"\
+    local before = line:sub(1, st.cx - 1)\
+    local after = line:sub(st.cx)\
+    local indent = before:match(\"^(%s*)\") or \"\"\
+    st.lines[st.cy] = before\
+    table.insert(st.lines, st.cy + 1, indent .. after)\
+    st.cy = st.cy + 1\
+    st.cx = #indent + 1\
+    st.dirty = true\
+    st.confirmClose = false\
+    st.message = nil\
+    return true\
+end\
+\
+local function backspace(st)\
+    if st.cx > 1 then\
+        local line = st.lines[st.cy] or \"\"\
+        st.lines[st.cy] = line:sub(1, st.cx - 2) .. line:sub(st.cx)\
+        st.cx = st.cx - 1\
+    elseif st.cy > 1 then\
+        local prev = st.lines[st.cy - 1] or \"\"\
+        local current = st.lines[st.cy] or \"\"\
+        st.cx = #prev + 1\
+        st.lines[st.cy - 1] = prev .. current\
+        table.remove(st.lines, st.cy)\
+        st.cy = st.cy - 1\
+    else\
+        return false\
+    end\
+    st.dirty = true\
+    st.confirmClose = false\
+    st.message = nil\
+    return true\
+end\
+\
+local function deleteForward(st)\
+    local line = st.lines[st.cy] or \"\"\
+    if st.cx <= #line then\
+        st.lines[st.cy] = line:sub(1, st.cx - 1) .. line:sub(st.cx + 1)\
+    elseif st.cy < #st.lines then\
+        st.lines[st.cy] = line .. (st.lines[st.cy + 1] or \"\")\
+        table.remove(st.lines, st.cy + 1)\
+    else\
+        return false\
+    end\
+    st.dirty = true\
+    st.confirmClose = false\
+    st.message = nil\
+    return true\
+end\
+\
+local function moveCursor(st, dx, dy)\
+    if dy ~= 0 then\
+        st.cy = math.max(1, math.min(#st.lines, st.cy + dy))\
+    end\
+    if dx ~= 0 then\
+        st.cx = st.cx + dx\
+        while st.cx < 1 and st.cy > 1 do\
+            st.cy = st.cy - 1\
+            st.cx = #(st.lines[st.cy] or \"\") + 1\
+        end\
+        while st.cx > #(st.lines[st.cy] or \"\") + 1 and st.cy < #st.lines do\
+            st.cx = st.cx - (#(st.lines[st.cy] or \"\") + 1)\
+            st.cy = st.cy + 1\
+        end\
+    end\
+    clampCursor(st)\
+    return true\
+end\
+\
+local function draw(ctx)\
+    local st = ctx.state\
+    local s = ctx.surface\
+    local shape = visibleShape(ctx)\
+    ensureCursor(st, shape)\
+\
+    s:clear(1)\
+    ui.raised(ctx, 0, 0, ctx.width, ctx.height, { bg = 1, light = 3, shadow = 10 })\
+    ui.text(ctx, 5, 5, \"editor\", 5, { maxWidth = 28 })\
+    local path = ui.truncate(st.path .. (st.dirty and \" *\" or \"\"), math.floor((ctx.width - 40) / 4))\
+    ui.text(ctx, 36, 5, path, 11, { maxWidth = ctx.width - 42 })\
+    s:rect(4, 14, math.max(1, ctx.width - 8), 1, 3)\
+\
+    for row = 1, shape.rows do\
+        local idx = st.scrollY + row\
+        local y = shape.top + (row - 1) * 7\
+        local line = st.lines[idx]\
+        if line then\
+            if shape.gutter > 0 then\
+                local ln = tostring(idx)\
+                ui.text(ctx, shape.left, y, ui.truncate(ln, math.floor((shape.gutter - 4) / 4)), 3, {\
+                    maxWidth = shape.gutter - 5,\
+                })\
+            end\
+            local chunk = line:sub(st.scrollX + 1, st.scrollX + shape.cols)\
+            ui.text(ctx, shape.textX, y, chunk, 9, { maxWidth = shape.textW })\
+        else\
+            ui.text(ctx, shape.textX, y, \"~\", 3, { maxWidth = shape.textW })\
+        end\
+    end\
+\
+    local cursorRow = st.cy - st.scrollY\
+    if cursorRow >= 1 and cursorRow <= shape.rows then\
+        local cursorCol = st.cx - st.scrollX\
+        if cursorCol >= 1 and cursorCol <= shape.cols + 1 then\
+            local x = shape.textX + (cursorCol - 1) * 4\
+            local y = shape.top + (cursorRow - 1) * 7\
+            if math.floor(((syscall.getUptime and syscall.getUptime() or 0) / 500)) % 2 == 0 then\
+                s:rect(x, y, 1, 6, 6)\
+            end\
+        end\
+    end\
+\
+    s:rect(4, math.max(0, ctx.height - 11), math.max(1, ctx.width - 8), 1, 3)\
+    local status = st.message or string.format(\"%d,%d  ctrl+s save\", st.cy, st.cx)\
+    ui.text(ctx, 5, math.max(0, ctx.height - 8), ui.truncate(status, math.floor((ctx.width - 10) / 4)), st.message and 6 or 3, {\
+        maxWidth = ctx.width - 10,\
+    })\
+end\
+\
+function editor.new(opts)\
+    opts = opts or {}\
+    local home = (syscall.getEnviron and syscall.getEnviron(\"HOME\")) or \"/home\"\
+    local path = normalize(opts.path or (home:gsub(\"/$\", \"\") .. \"/untitled.txt\"))\
+    return app.new({\
+        title = opts.title or \"editor\",\
+        bg = 1,\
+        minWidth = 70,\
+        minHeight = 50,\
+        state = {\
+            path = path,\
+            lines = { \"\" },\
+            cx = 1,\
+            cy = 1,\
+            scrollX = 0,\
+            scrollY = 0,\
+            dirty = false,\
+            confirmClose = false,\
+            message = nil,\
+        },\
+        init = function(ctx)\
+            loadFile(ctx.state)\
+        end,\
+        resize = function(ctx)\
+            ctx.invalidate()\
+        end,\
+        draw = draw,\
+        close = function(ctx)\
+            local st = ctx.state\
+            if st.dirty and not st.confirmClose then\
+                st.confirmClose = true\
+                st.message = \"unsaved changes; ctrl+w again\"\
+                ctx.invalidate()\
+                return false\
+            end\
+            return true\
+        end,\
+        key = function(ctx, event)\
+            local st = ctx.state\
+            if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+                local ch = tostring(event.char or \"\")\
+                if ch == \"\\n\" or ch == \"\\r\" then\
+                    return newline(st)\
+                end\
+                if ch == \"\\t\" then\
+                    return insertText(st, \"    \")\
+                end\
+                if isBackspaceChar(ch) then\
+                    return backspace(st)\
+                end\
+                if isPrintableChar(ch) then\
+                    return insertText(st, ch)\
+                end\
+                return true\
+            end\
+            if event.type ~= \"key_down\" or event.held then\
+                return false\
+            end\
+\
+            local mod = event.mod or {}\
+            if mod.ctrl and event.name == \"s\" then\
+                return saveFile(st)\
+            elseif event.name == \"left\" then\
+                return moveCursor(st, -1, 0)\
+            elseif event.name == \"right\" then\
+                return moveCursor(st, 1, 0)\
+            elseif event.name == \"up\" then\
+                return moveCursor(st, 0, -1)\
+            elseif event.name == \"down\" then\
+                return moveCursor(st, 0, 1)\
+            elseif event.name == \"home\" then\
+                st.cx = 1\
+            elseif event.name == \"end\" then\
+                st.cx = #(st.lines[st.cy] or \"\") + 1\
+            elseif event.name == \"pageUp\" then\
+                st.cy = math.max(1, st.cy - math.max(1, math.floor((ctx.height - 26) / 7)))\
+            elseif event.name == \"pageDown\" then\
+                st.cy = math.min(#st.lines, st.cy + math.max(1, math.floor((ctx.height - 26) / 7)))\
+            elseif event.name == \"enter\" or event.name == \"numPadEnter\" or event.name == \"return\" then\
+                return newline(st)\
+            elseif event.name == \"backspace\" then\
+                return backspace(st)\
+            elseif event.name == \"delete\" then\
+                return deleteForward(st)\
+            elseif event.name == \"tab\" then\
+                return insertText(st, \"    \")\
+            else\
+                return false\
+            end\
+            clampCursor(st)\
+            return true\
+        end,\
+    })\
+end\
+\
+return editor\
+",
+    },
+    {
+      checksum = "sha256:5afc9bea42172c0a544c1d09e94496eddc791842ffc6ac6bbd7d732b1208a9c0:24275",
+      path = "/usr/lib/apps/files.lua",
+      text = "local app = require(\"app\")\
+local ui = require(\"ui\")\
+\
+local files = {}\
+\
+local function join(path, name)\
+    if path == \"/\" then\
+        return \"/\" .. name\
+    end\
+    return path:gsub(\"/$\", \"\") .. \"/\" .. name\
+end\
+\
+local function basename(path)\
+    path = tostring(path or \"\"):gsub(\"/+$\", \"\")\
+    return path:match(\"([^/]+)$\") or path\
+end\
+\
+local function isBackspaceChar(ch)\
+    local code = ch and ch:byte(1)\
+    return code == 8 or code == 127\
+end\
+\
+local function isPrintableChar(ch)\
+    if type(ch) ~= \"string\" or #ch ~= 1 then\
+        return false\
+    end\
+    local code = ch:byte(1)\
+    return code >= 32 and code <= 126\
+end\
+\
+local function isEnterEvent(event)\
+    if not event then\
+        return false\
+    end\
+    if event.type == \"char\" then\
+        return event.char == \"\\n\" or event.char == \"\\r\"\
+    end\
+    if event.type == \"key_down\" then\
+        return event.name == \"enter\" or event.name == \"numPadEnter\" or event.name == \"return\"\
+    end\
+    return false\
+end\
+\
+local function markEnterKey(st, event)\
+    st.suppressEnterChar = true\
+    st.suppressEnterCharTime = event and event.time or nil\
+end\
+\
+local function shouldSuppressEnterChar(st, event)\
+    if not (st and st.suppressEnterChar and event and event.type == \"char\" and isEnterEvent(event)) then\
+        return false\
+    end\
+    if st.suppressEnterCharTime and event.time and event.time - st.suppressEnterCharTime > 250 then\
+        st.suppressEnterChar = false\
+        st.suppressEnterCharTime = nil\
+        return false\
+    end\
+    st.suppressEnterChar = false\
+    st.suppressEnterCharTime = nil\
+    return true\
+end\
+\
+local function normalize(path)\
+    path = tostring(path or \"/\")\
+    if path == \"\" then\
+        path = \"/\"\
+    end\
+    local parts = {}\
+    for part in path:gmatch(\"[^/]+\") do\
+        if part == \"..\" then\
+            if #parts > 0 then\
+                table.remove(parts)\
+            end\
+        elseif part ~= \".\" and part ~= \"\" then\
+            parts[#parts + 1] = part\
+        end\
+    end\
+    return \"/\" .. table.concat(parts, \"/\")\
+end\
+\
+local function parent(path)\
+    path = normalize(path)\
+    if path == \"/\" then\
+        return \"/\"\
+    end\
+    local p = path:match(\"^(.*)/[^/]+$\")\
+    if not p or p == \"\" then\
+        return \"/\"\
+    end\
+    return p\
+end\
+\
+local function typeOf(path)\
+    local ok, t = pcall(syscall.type, path)\
+    return ok and t or nil\
+end\
+\
+local function statOf(path)\
+    local ok, st = pcall(syscall.stat, path)\
+    return ok and st or nil\
+end\
+\
+local function shortError(err)\
+    err = tostring(err or \"unknown error\")\
+    local first = err:match(\"^([^\\n]+)\") or err\
+    local bare = first:match(\"^%s*([A-Z][A-Z0-9_]+)%s*$\")\
+    if bare then\
+        return bare\
+    end\
+    local code, msg = first:match(\"^%s*([A-Z][A-Z0-9_]+):%s*(.*)\")\
+    if code then\
+        return code .. (msg and msg ~= \"\" and (\": \" .. msg) or \"\")\
+    end\
+    local line = first:match(\":%d+:%s*(.+)\")\
+    return line or first\
+end\
+\
+local function refresh(st)\
+    st.entries = {}\
+    st.message = nil\
+    local ok, list = pcall(syscall.listdir, st.path)\
+    if not ok or not list then\
+        st.message = \"cannot read \" .. st.path\
+        st.path = parent(st.path)\
+        ok, list = pcall(syscall.listdir, st.path)\
+    end\
+    list = ok and list or {}\
+    table.sort(list, function(a, b)\
+        local ta = typeOf(join(st.path, a))\
+        local tb = typeOf(join(st.path, b))\
+        if ta == \"directory\" and tb ~= \"directory\" then\
+            return true\
+        end\
+        if ta ~= \"directory\" and tb == \"directory\" then\
+            return false\
+        end\
+        return string.lower(a) < string.lower(b)\
+    end)\
+    local query = string.lower(st.filter or \"\")\
+    if st.path ~= \"/\" then\
+        st.entries[#st.entries + 1] = { name = \"..\", path = parent(st.path), type = \"directory\", up = true }\
+    end\
+    for _, name in ipairs(list) do\
+        if query == \"\" or string.find(string.lower(name), query, 1, true) then\
+            local path = join(st.path, name)\
+            local t = typeOf(path) or \"?\"\
+            local stat = statOf(path) or {}\
+            st.entries[#st.entries + 1] = {\
+                name = name,\
+                path = path,\
+                type = t,\
+                size = stat.size or 0,\
+            }\
+        end\
+    end\
+    if #st.entries == 0 then\
+        st.selected = 0\
+    else\
+        st.selected = math.max(1, math.min(st.selected or 1, #st.entries))\
+    end\
+    st.scroll = math.max(0, math.min(st.scroll or 0, math.max(0, #st.entries - 1)))\
+end\
+\
+local function ensureVisible(st, rows)\
+    if st.selected <= 0 then\
+        st.scroll = 0\
+        return\
+    end\
+    if st.selected <= st.scroll then\
+        st.scroll = st.selected - 1\
+    elseif st.selected > st.scroll + rows then\
+        st.scroll = st.selected - rows\
+    end\
+end\
+\
+local function selectedEntry(st)\
+    return st.entries and st.entries[st.selected]\
+end\
+\
+local function copyFile(src, dst)\
+    local okRead, inFd = pcall(syscall.open, src, \"r\")\
+    if not okRead then\
+        return false, inFd\
+    end\
+    local okWrite, outFd = pcall(syscall.open, dst, \"w\")\
+    if not okWrite then\
+        pcall(syscall.close, inFd)\
+        return false, outFd\
+    end\
+    while true do\
+        local ok, data = pcall(syscall.read, inFd, 4096)\
+        if not ok then\
+            pcall(syscall.close, inFd)\
+            pcall(syscall.close, outFd)\
+            return false, data\
+        end\
+        if not data or data == \"\" then\
+            break\
+        end\
+        local wrote, why = pcall(syscall.write, outFd, data)\
+        if not wrote then\
+            pcall(syscall.close, inFd)\
+            pcall(syscall.close, outFd)\
+            return false, why\
+        end\
+    end\
+    pcall(syscall.close, inFd)\
+    pcall(syscall.close, outFd)\
+    return true\
+end\
+\
+local function removePath(path, recursive)\
+    path = normalize(path)\
+    if path == \"/\" then\
+        return false, \"refusing to delete /\"\
+    end\
+    local t = typeOf(path)\
+    if not t then\
+        return false, \"no such path\"\
+    end\
+    if t == \"directory\" then\
+        if not recursive then\
+            return false, \"is a directory\"\
+        end\
+        local okList, list = pcall(syscall.listdir, path)\
+        if not okList then\
+            return false, list\
+        end\
+        for _, name in ipairs(list or {}) do\
+            local ok, why = removePath(join(path, name), true)\
+            if not ok then\
+                return false, why\
+            end\
+        end\
+    end\
+    local ok, why = pcall(syscall.remove, path)\
+    return ok, why\
+end\
+\
+local function copyPath(src, dst, recursive)\
+    src = normalize(src)\
+    dst = normalize(dst)\
+    local srcType = typeOf(src)\
+    if not srcType then\
+        return false, \"source missing\"\
+    end\
+    if typeOf(dst) == \"directory\" then\
+        dst = join(dst, basename(src))\
+    end\
+    if src == dst then\
+        return false, \"same path\"\
+    end\
+    if srcType == \"directory\" and dst:sub(1, #src + 1) == src:gsub(\"/$\", \"\") .. \"/\" then\
+        return false, \"cannot copy into itself\"\
+    end\
+    if typeOf(dst) then\
+        return false, \"destination exists\"\
+    end\
+    if srcType == \"directory\" then\
+        if not recursive then\
+            return false, \"source is directory\"\
+        end\
+        local ok, why = pcall(syscall.mkdir, dst .. \"/\")\
+        if not ok then\
+            return false, why\
+        end\
+        local okList, list = pcall(syscall.listdir, src)\
+        if not okList then\
+            return false, list\
+        end\
+        for _, name in ipairs(list or {}) do\
+            local copied, copyErr = copyPath(join(src, name), join(dst, name), true)\
+            if not copied then\
+                return false, copyErr\
+            end\
+        end\
+        return true\
+    elseif srcType == \"file\" then\
+        return copyFile(src, dst)\
+    end\
+    return false, \"unsupported type: \" .. tostring(srcType)\
+end\
+\
+local function touchFile(path)\
+    local lastErr\
+    for _, mode in ipairs({ \"w\", \"a\" }) do\
+        local ok, err = pcall(function()\
+            local fd = syscall.open(path, mode)\
+            if fd ~= nil then\
+                pcall(syscall.write, fd, \"\")\
+                syscall.close(fd)\
+            end\
+        end)\
+        if ok then\
+            return true\
+        end\
+        lastErr = err\
+    end\
+    return false, lastErr\
+end\
+\
+local function createViaFileOps(path, kind)\
+    local ok, created, err = pcall(syscall.fs_create, path, kind)\
+    if not ok then\
+        if tostring(created):find(\"Unknown syscall: fs_create\", 1, true) then\
+            return nil, created\
+        end\
+        return false, created\
+    end\
+    if created then\
+        return true\
+    end\
+    return false, err or \"unknown error\"\
+end\
+\
+local function createPath(st, name)\
+    name = tostring(name or \"\")\
+    if name == \"\" then\
+        st.message = \"name required\"\
+        return false\
+    end\
+\
+    local makeDir = name:sub(-1) == \"/\"\
+    if makeDir then\
+        name = name:sub(1, #name - 1)\
+    end\
+    if name == \"\" then\
+        st.message = \"name required\"\
+        return false\
+    end\
+    if name:find(\"/\", 1, true) then\
+        st.message = \"name cannot contain /\"\
+        return false\
+    end\
+    if name == \".\" or name == \"..\" then\
+        st.message = \"invalid name\"\
+        return false\
+    end\
+\
+    local path = join(st.path, name)\
+    local exists = typeOf(path) ~= nil\
+    if not exists then\
+        local okExists, existsValue = pcall(syscall.exists, path)\
+        exists = okExists and existsValue or false\
+    end\
+    if exists then\
+        st.message = \"already exists: \" .. name\
+        return false\
+    end\
+\
+    local ok, err = createViaFileOps(path, makeDir and \"directory\" or \"file\")\
+    if ok == nil then\
+        if makeDir then\
+            local mkdirPath = path:sub(-1) == \"/\" and path or (path .. \"/\")\
+            ok, err = pcall(syscall.mkdir, mkdirPath)\
+        else\
+            ok, err = touchFile(path)\
+        end\
+    end\
+    if not ok then\
+        st.message = \"create failed: \" .. shortError(err)\
+        return false\
+    end\
+\
+    st.filter = \"\"\
+    refresh(st)\
+    st.message = \"created \" .. name .. (makeDir and \"/\" or \"\")\
+    for i, entry in ipairs(st.entries or {}) do\
+        if entry.path == path then\
+            st.selected = i\
+            break\
+        end\
+    end\
+    return true\
+end\
+\
+local function deleteEntry(st, entry)\
+    if not entry or entry.up then\
+        st.message = \"nothing selected\"\
+        return false\
+    end\
+    local ok, err = removePath(entry.path, true)\
+    if not ok then\
+        st.message = \"delete failed: \" .. shortError(err)\
+        return false\
+    end\
+    local oldSelected = st.selected or 1\
+    refresh(st)\
+    st.message = \"deleted \" .. entry.name\
+    if #st.entries == 0 then\
+        st.selected = 0\
+    else\
+        st.selected = math.max(1, math.min(oldSelected, #st.entries))\
+    end\
+    return true\
+end\
+\
+local function renameEntry(st, entry, name)\
+    if not entry or entry.up then\
+        st.message = \"nothing selected\"\
+        return false\
+    end\
+    name = tostring(name or \"\")\
+    if name == \"\" then\
+        st.message = \"name required\"\
+        return false\
+    end\
+    if name:find(\"/\", 1, true) then\
+        st.message = \"name cannot contain /\"\
+        return false\
+    end\
+    if name == \".\" or name == \"..\" then\
+        st.message = \"invalid name\"\
+        return false\
+    end\
+    if name == entry.name then\
+        st.message = \"same name\"\
+        return false\
+    end\
+\
+    local dst = join(st.path, name)\
+    local ok, err = copyPath(entry.path, dst, true)\
+    if ok then\
+        ok, err = removePath(entry.path, true)\
+    end\
+    if not ok then\
+        st.message = \"rename failed: \" .. shortError(err)\
+        return false\
+    end\
+    st.filter = \"\"\
+    refresh(st)\
+    st.message = \"renamed \" .. entry.name .. \" -> \" .. name\
+    for i, e in ipairs(st.entries or {}) do\
+        if e.path == dst then\
+            st.selected = i\
+            break\
+        end\
+    end\
+    return true\
+end\
+\
+local function openCreateModal(st)\
+    st.modal = {\
+        kind = \"create\",\
+        input = \"\",\
+        error = nil,\
+    }\
+end\
+\
+local function openDeleteModal(st)\
+    local entry = selectedEntry(st)\
+    if not entry or entry.up then\
+        st.message = \"select a file or dir\"\
+        return\
+    end\
+    st.modal = {\
+        kind = \"delete\",\
+        entry = entry,\
+        error = nil,\
+    }\
+end\
+\
+local function openRenameModal(st)\
+    local entry = selectedEntry(st)\
+    if not entry or entry.up then\
+        st.message = \"select a file or dir\"\
+        return\
+    end\
+    st.modal = {\
+        kind = \"rename\",\
+        entry = entry,\
+        input = entry.name,\
+        error = nil,\
+    }\
+end\
+\
+local function closeModal(st)\
+    st.modal = nil\
+end\
+\
+local function launchEditor(st, entry)\
+    local launcher = st.launcher\
+    if not launcher and _G and _G.hywm and type(_G.hywm.launch) == \"function\" then\
+        launcher = _G.hywm.launch\
+    end\
+    if type(launcher) ~= \"function\" then\
+        st.message = \"open failed: launcher unavailable\"\
+        return false\
+    end\
+    local ok, launched = pcall(launcher, \"editor\", { path = entry.path })\
+    if not ok then\
+        st.message = \"open failed: \" .. shortError(launched)\
+        return false\
+    end\
+    if not launched then\
+        st.message = \"open failed: editor unavailable\"\
+        return false\
+    end\
+    st.message = \"opened \" .. entry.name\
+    return true\
+end\
+\
+local function openSelected(st)\
+    local entry = selectedEntry(st)\
+    if not entry then\
+        return\
+    end\
+    if entry.type == \"directory\" then\
+        st.path = normalize(entry.path)\
+        st.filter = \"\"\
+        st.selected = 1\
+        st.scroll = 0\
+        refresh(st)\
+    else\
+        if launchEditor(st, entry) then\
+            return\
+        end\
+        st.preview = entry\
+    end\
+end\
+\
+local function move(st, delta)\
+    if #st.entries == 0 then\
+        st.selected = 0\
+        return\
+    end\
+    st.selected = math.max(1, math.min(#st.entries, st.selected + delta))\
+end\
+\
+local function draw(ctx)\
+    local st = ctx.state\
+    local s = ctx.surface\
+    s:clear(1)\
+    ui.raised(ctx, 0, 0, ctx.width, ctx.height, { bg = 1, light = 3, shadow = 10 })\
+    ui.text(ctx, 5, 5, \"files\", 5, { maxWidth = 34 })\
+    ui.text(ctx, 32, 5, ui.truncate(st.path, math.floor((ctx.width - 40) / 4)), 11, { maxWidth = ctx.width - 40 })\
+    if st.filter ~= \"\" then\
+        ui.text(ctx, 5, 14, \"filter \" .. st.filter, 9, { maxWidth = ctx.width - 10 })\
+    else\
+        ui.text(ctx, 5, 14, \"enter open  a add  d delete  r rename  backspace up\", 3, { maxWidth = ctx.width - 10 })\
+    end\
+\
+    local y = 24\
+    local rowH = 9\
+    local rows = math.max(1, math.floor((ctx.height - y - 13) / rowH))\
+    ensureVisible(st, rows)\
+    for row = 1, rows do\
+        local idx = st.scroll + row\
+        local entry = st.entries[idx]\
+        if not entry then\
+            break\
+        end\
+        local selected = idx == st.selected\
+        local prefix = entry.type == \"directory\" and \"[d] \" or \"[f] \"\
+        local label = prefix .. entry.name\
+        if entry.type ~= \"directory\" then\
+            label = label .. \" \" .. tostring(entry.size or 0) .. \"b\"\
+        end\
+        ui.textRow(ctx, 5, y + (row - 1) * rowH, ctx.width - 10, rowH - 1, label, {\
+            bg = selected and 4 or 2,\
+            fg = selected and 15 or (entry.type == \"directory\" and 9 or 11),\
+            accent = entry.type == \"directory\" and 5 or nil,\
+        })\
+    end\
+\
+    local status = st.message or tostring(#st.entries) .. \" entries\"\
+    ui.text(ctx, 5, math.max(0, ctx.height - 8), ui.truncate(status, math.floor((ctx.width - 10) / 4)), 3, {\
+        maxWidth = ctx.width - 10,\
+    })\
+\
+    if st.modal then\
+        local mw = math.min(ctx.width - 10, math.max(56, math.floor(ctx.width * 0.72)))\
+        local hasInput = st.modal.kind == \"create\" or st.modal.kind == \"rename\"\
+        local mh = hasInput and 34 or 30\
+        local mx = math.max(2, math.floor((ctx.width - mw) / 2))\
+        local my = math.max(6, math.floor((ctx.height - mh) / 2))\
+        s:rect(mx - 2, my - 2, mw + 4, mh + 4, 10)\
+        ui.panel(ctx, mx, my, mw, mh, { bg = 1, border = 4 })\
+\
+        local title = \"new file or dir\"\
+        if st.modal.kind == \"rename\" then\
+            title = \"rename \" .. tostring(st.modal.entry and st.modal.entry.name or \"\")\
+        elseif st.modal.kind == \"delete\" then\
+            title = \"delete \" .. tostring(st.modal.entry and st.modal.entry.name or \"\")\
+        end\
+        ui.text(ctx, mx + 5, my + 5, ui.truncate(title, math.floor((mw - 10) / 4)), 5, { maxWidth = mw - 10 })\
+\
+        if hasInput then\
+            local inputY = my + 16\
+            s:rect(mx + 5, inputY - 2, mw - 10, 9, 0)\
+            s:frame(mx + 5, inputY - 2, mw - 10, 9, 3)\
+            local maxChars = math.max(1, math.floor((mw - 18) / 4))\
+            local text = ui.truncate(st.modal.input, maxChars)\
+            ui.text(ctx, mx + 8, inputY, text, 9, { maxWidth = mw - 16 })\
+            if math.floor((syscall.getUptime and syscall.getUptime() or 0) / 500) % 2 == 0 then\
+                local cx = mx + 8 + ui.textWidth(text, { scale = 1 })\
+                s:rect(math.min(mx + mw - 9, cx), inputY, 1, 5, 9)\
+            end\
+        elseif st.modal.kind == \"delete\" then\
+            ui.text(ctx, mx + 5, my + 16, \"this cannot be undone\", 7, { maxWidth = mw - 10 })\
+        end\
+\
+        local hint = \"enter create  delete cancel  trailing / makes dir\"\
+        if st.modal.kind == \"rename\" then\
+            hint = \"enter rename  delete cancel\"\
+        elseif st.modal.kind == \"delete\" then\
+            hint = \"enter delete  delete cancel\"\
+        end\
+        hint = st.modal.error or hint\
+        ui.text(ctx, mx + 5, my + mh - 8, ui.truncate(hint, math.floor((mw - 10) / 4)), st.modal.error and 7 or 11, {\
+            maxWidth = mw - 10,\
+        })\
+    end\
+end\
+\
+local function handleModalKey(st, event)\
+    if not st.modal then\
+        return false\
+    end\
+    local modal = st.modal\
+    local hasInput = modal.kind == \"create\" or modal.kind == \"rename\"\
+    if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+        if isEnterEvent(event) then\
+            if shouldSuppressEnterChar(st, event) then\
+                return true\
+            end\
+            local ok\
+            if modal.kind == \"create\" then\
+                ok = createPath(st, modal.input)\
+            elseif modal.kind == \"rename\" then\
+                ok = renameEntry(st, modal.entry, modal.input)\
+            elseif modal.kind == \"delete\" then\
+                ok = deleteEntry(st, modal.entry)\
+            end\
+            if ok then\
+                closeModal(st)\
+            else\
+                modal.error = st.message\
+            end\
+            return true\
+        end\
+        if not hasInput then\
+            return true\
+        end\
+        local ch = tostring(event.char or \"\")\
+        if isBackspaceChar(ch) then\
+            modal.input = modal.input:sub(1, #modal.input - 1)\
+            modal.error = nil\
+            return true\
+        end\
+        if isPrintableChar(ch) then\
+            modal.input = modal.input .. ch\
+            modal.error = nil\
+            return true\
+        end\
+        return true\
+    end\
+    if event.type ~= \"key_down\" or event.held then\
+        return true\
+    end\
+    if event.name == \"escape\" or event.name == \"delete\" then\
+        closeModal(st)\
+    elseif isEnterEvent(event) then\
+        markEnterKey(st, event)\
+        local ok\
+        if modal.kind == \"create\" then\
+            ok = createPath(st, modal.input)\
+        elseif modal.kind == \"rename\" then\
+            ok = renameEntry(st, modal.entry, modal.input)\
+        elseif modal.kind == \"delete\" then\
+            ok = deleteEntry(st, modal.entry)\
+        end\
+        if ok then\
+            closeModal(st)\
+        else\
+            modal.error = st.message\
+        end\
+    elseif event.name == \"backspace\" and hasInput then\
+        modal.input = modal.input:sub(1, #modal.input - 1)\
+        modal.error = nil\
+    else\
+        return true\
+    end\
+    return true\
+end\
+\
+function files.new(opts)\
+    opts = opts or {}\
+    local start = opts.path or (syscall.getEnviron and syscall.getEnviron(\"HOME\")) or \"/\"\
+    return app.new({\
+        title = opts.title or \"files\",\
+        bg = 1,\
+        minWidth = 70,\
+        minHeight = 50,\
+        state = {\
+            path = normalize(start),\
+            entries = {},\
+            selected = 1,\
+            scroll = 0,\
+            filter = \"\",\
+            message = nil,\
+            modal = nil,\
+            launcher = opts.launcher,\
+        },\
+        init = function(ctx)\
+            refresh(ctx.state)\
+        end,\
+        resize = function(ctx)\
+            ctx.invalidate()\
+        end,\
+        draw = draw,\
+        key = function(ctx, event)\
+            local st = ctx.state\
+            if st.modal then\
+                return handleModalKey(st, event)\
+            end\
+            if isEnterEvent(event) then\
+                if shouldSuppressEnterChar(st, event) then\
+                    return true\
+                end\
+                if event.type == \"key_down\" and event.held then\
+                    return false\
+                end\
+                if event.type == \"key_down\" then\
+                    markEnterKey(st, event)\
+                end\
+                openSelected(st)\
+                return true\
+            end\
+            if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+                local ch = tostring(event.char or \"\")\
+                if ch == \"a\" or ch == \"A\" then\
+                    openCreateModal(st)\
+                    return true\
+                end\
+                if ch == \"d\" or ch == \"D\" then\
+                    openDeleteModal(st)\
+                    return true\
+                end\
+                if ch == \"r\" or ch == \"R\" then\
+                    openRenameModal(st)\
+                    return true\
+                end\
+                if isBackspaceChar(ch) then\
+                    st.filter = st.filter:sub(1, #st.filter - 1)\
+                    st.selected = 1\
+                    st.scroll = 0\
+                    refresh(st)\
+                    return true\
+                end\
+                if ch == \"/\" and st.filter == \"\" then\
+                    st.path = \"/\"\
+                    st.selected = 1\
+                    st.scroll = 0\
+                    refresh(st)\
+                    return true\
+                end\
+                if not isPrintableChar(ch) then\
+                    return true\
+                end\
+                st.filter = st.filter .. ch\
+                st.selected = 1\
+                st.scroll = 0\
+                refresh(st)\
+                return true\
+            end\
+            if event.type ~= \"key_down\" or event.held then\
+                return false\
+            end\
+            if event.name == \"up\" then\
+                move(st, -1)\
+            elseif event.name == \"down\" then\
+                move(st, 1)\
+            elseif event.name == \"pageUp\" then\
+                move(st, -6)\
+            elseif event.name == \"pageDown\" then\
+                move(st, 6)\
+            elseif event.name == \"backspace\" then\
+                if st.filter ~= \"\" then\
+                    st.filter = st.filter:sub(1, #st.filter - 1)\
+                    st.selected = 1\
+                    st.scroll = 0\
+                    refresh(st)\
+                else\
+                    st.path = parent(st.path)\
+                    st.selected = 1\
+                    st.scroll = 0\
+                    refresh(st)\
+                end\
+            elseif event.name == \"delete\" then\
+                st.filter = \"\"\
+                st.selected = 1\
+                st.scroll = 0\
+                refresh(st)\
+            elseif event.name == \"r\" then\
+                openRenameModal(st)\
+            elseif event.name == \"d\" then\
+                openDeleteModal(st)\
+            elseif event.name == \"h\" then\
+                st.path = normalize((syscall.getEnviron and syscall.getEnviron(\"HOME\")) or \"/\")\
+                st.selected = 1\
+                st.scroll = 0\
+                refresh(st)\
+            elseif event.name == \"slash\" then\
+                st.path = \"/\"\
+                st.selected = 1\
+                st.scroll = 0\
+                refresh(st)\
+            else\
+                return false\
+            end\
+            return true\
+        end,\
+    })\
+end\
+\
+return files\
+",
+    },
+    {
+      checksum = "sha256:42168e6e01eba2e6ac365204f92c1d8464cf58ebd8425c656e58ba0658fdb05b:44267",
+      path = "/usr/lib/apps/terminal.lua",
+      text = "local app = require(\"app\")\
+local ui = require(\"ui\")\
+local pty = require(\"pty\")\
+\
+local terminal = {}\
+\
+local function split(line)\
+    local args = {}\
+    for token in tostring(line or \"\"):gmatch(\"%S+\") do\
+        args[#args + 1] = token\
+    end\
+    return args\
+end\
+\
+local function isBackspaceChar(ch)\
+    local code = ch and ch:byte(1)\
+    return code == 8 or code == 127\
+end\
+\
+local function isPrintableChar(ch)\
+    if type(ch) ~= \"string\" or #ch ~= 1 then\
+        return false\
+    end\
+    local code = ch:byte(1)\
+    return code >= 32 and code <= 126\
+end\
+\
+local palette = {\
+    [0] = 0x0B1020,\
+    [1] = 0x111827,\
+    [2] = 0x1F2937,\
+    [3] = 0x374151,\
+    [4] = 0x60A5FA,\
+    [5] = 0x34D399,\
+    [6] = 0xFBBF24,\
+    [7] = 0xF87171,\
+    [8] = 0xA78BFA,\
+    [9] = 0xF9FAFB,\
+    [10] = 0x020617,\
+    [11] = 0x64748B,\
+}\
+\
+local defaultFg = 11\
+local defaultBg = 0\
+\
+local ansiBasic = {\
+    [30] = 10,\
+    [31] = 7,\
+    [32] = 5,\
+    [33] = 6,\
+    [34] = 4,\
+    [35] = 8,\
+    [36] = 4,\
+    [37] = defaultFg,\
+    [90] = 11,\
+    [91] = 7,\
+    [92] = 5,\
+    [93] = 6,\
+    [94] = 4,\
+    [95] = 8,\
+    [96] = 4,\
+    [97] = 9,\
+}\
+\
+local function rgbParts(rgb)\
+    rgb = math.floor(tonumber(rgb) or 0)\
+    local r = math.floor(rgb / 0x10000) % 0x100\
+    local g = math.floor(rgb / 0x100) % 0x100\
+    local b = rgb % 0x100\
+    return r, g, b\
+end\
+\
+local function nearestPalette(rgb)\
+    rgb = math.floor(tonumber(rgb) or 0)\
+    if rgb == 0xFFFFFF then\
+        return defaultFg\
+    end\
+    local rr, gg, bb = rgbParts(rgb)\
+    local best, bestDist = defaultFg, math.huge\
+    for idx, value in pairs(palette) do\
+        local r, g, b = rgbParts(value)\
+        local dist = (rr - r) * (rr - r) + (gg - g) * (gg - g) + (bb - b) * (bb - b)\
+        if dist < bestDist then\
+            best, bestDist = idx, dist\
+        end\
+    end\
+    return best\
+end\
+\
+local function makeCell(ch, fg, bg)\
+    return {\
+        ch = ch or \" \",\
+        fg = fg or defaultFg,\
+        bg = bg or defaultBg,\
+    }\
+end\
+\
+local function lineFromText(text, fg, bg)\
+    local cells = {}\
+    text = tostring(text or \"\")\
+    for i = 1, #text do\
+        cells[i] = makeCell(text:sub(i, i), fg, bg)\
+    end\
+    return { cells = cells }\
+end\
+\
+local function cellsText(cells)\
+    local out = {}\
+    for i = 1, #(cells or {}) do\
+        out[i] = (cells[i] and cells[i].ch) or \" \"\
+    end\
+    return table.concat(out)\
+end\
+\
+local function cloneCells(cells, first, last)\
+    local out = {}\
+    first = first or 1\
+    last = last or #(cells or {})\
+    for i = first, last do\
+        local cell = cells[i]\
+        if cell then\
+            out[#out + 1] = makeCell(cell.ch, cell.fg, cell.bg)\
+        end\
+    end\
+    return out\
+end\
+\
+local function normalize(cwd, path)\
+    path = tostring(path or \"\")\
+    if path == \"\" then\
+        return cwd\
+    end\
+    if path:sub(1, 1) ~= \"/\" then\
+        path = cwd:gsub(\"/$\", \"\") .. \"/\" .. path\
+    end\
+    local parts = {}\
+    for part in path:gmatch(\"[^/]+\") do\
+        if part == \"..\" then\
+            if #parts > 0 then\
+                table.remove(parts)\
+            end\
+        elseif part ~= \".\" and part ~= \"\" then\
+            parts[#parts + 1] = part\
+        end\
+    end\
+    return \"/\" .. table.concat(parts, \"/\")\
+end\
+\
+local function join(path, name)\
+    if path == \"/\" then\
+        return \"/\" .. name\
+    end\
+    return path:gsub(\"/$\", \"\") .. \"/\" .. name\
+end\
+\
+local function cleanError(why)\
+    why = tostring(why or \"unknown error\")\
+    return why:match(\"^([^\\n]+)\") or why\
+end\
+\
+local function basename(path)\
+    path = tostring(path or \"\"):gsub(\"/+$\", \"\")\
+    return path:match(\"([^/]+)$\") or path\
+end\
+\
+local function createFile(path)\
+    local ok, fdOrErr = pcall(syscall.open, path, \"w\")\
+    if not ok then\
+        return false, cleanError(fdOrErr)\
+    end\
+    if fdOrErr ~= nil then\
+        pcall(syscall.write, fdOrErr, \"\")\
+        pcall(syscall.close, fdOrErr)\
+    end\
+    return true\
+end\
+\
+local function makePath(cwd, raw, mode)\
+    raw = tostring(raw or \"\")\
+    if raw == \"\" then\
+        return false, \"empty path\"\
+    end\
+    local dir = mode == \"directory\" or (mode == \"auto\" and raw:sub(-1) == \"/\")\
+    local target = dir and raw:gsub(\"/+$\", \"\") or raw\
+    if dir and target == \"\" then\
+        target = \"/\"\
+    end\
+    local path = normalize(cwd, target)\
+    local t = syscall.type(path)\
+    if t then\
+        if dir and t == \"directory\" then\
+            return true\
+        elseif not dir and t == \"file\" then\
+            return true\
+        end\
+        return false, \"already exists: \" .. path\
+    end\
+    if dir then\
+        local ok, why = pcall(syscall.mkdir, path .. \"/\")\
+        return ok, cleanError(why)\
+    end\
+    return createFile(path)\
+end\
+\
+local function removePath(cwd, raw, recursive, force)\
+    local path = normalize(cwd, raw)\
+    if path == \"/\" then\
+        return false, \"refusing to remove /\"\
+    end\
+    local t = syscall.type(path)\
+    if not t then\
+        return force, \"no such path: \" .. path\
+    end\
+    if t == \"directory\" then\
+        if not recursive then\
+            return false, \"is a directory: \" .. path\
+        end\
+        local okList, list = pcall(syscall.listdir, path)\
+        if not okList then\
+            return false, cleanError(list)\
+        end\
+        list = list or {}\
+        if #list > 0 and not force then\
+            return false, \"directory not empty: \" .. path .. \" (use -rf)\"\
+        end\
+        for _, name in ipairs(list) do\
+            local ok, why = removePath(cwd, path:gsub(\"/$\", \"\") .. \"/\" .. name, recursive, force)\
+            if not ok then\
+                return false, why\
+            end\
+        end\
+    end\
+    local ok, why = pcall(syscall.remove, path)\
+    return ok, cleanError(why)\
+end\
+\
+local function copyFile(src, dst)\
+    local okRead, inFd = pcall(syscall.open, src, \"r\")\
+    if not okRead then\
+        return false, cleanError(inFd)\
+    end\
+    local okWrite, outFd = pcall(syscall.open, dst, \"w\")\
+    if not okWrite then\
+        pcall(syscall.close, inFd)\
+        return false, cleanError(outFd)\
+    end\
+    while true do\
+        local ok, data = pcall(syscall.read, inFd, 4096)\
+        if not ok then\
+            pcall(syscall.close, inFd)\
+            pcall(syscall.close, outFd)\
+            return false, cleanError(data)\
+        end\
+        if not data or data == \"\" then\
+            break\
+        end\
+        local wrote, why = pcall(syscall.write, outFd, data)\
+        if not wrote then\
+            pcall(syscall.close, inFd)\
+            pcall(syscall.close, outFd)\
+            return false, cleanError(why)\
+        end\
+    end\
+    pcall(syscall.close, inFd)\
+    pcall(syscall.close, outFd)\
+    return true\
+end\
+\
+local function copyPath(cwd, src, dst, recursive, force)\
+    src = normalize(cwd, src)\
+    dst = normalize(cwd, dst)\
+    local srcType = syscall.type(src)\
+    if not srcType then\
+        return false, \"no such path: \" .. src\
+    end\
+    if syscall.type(dst) == \"directory\" then\
+        dst = join(dst, basename(src))\
+    end\
+    if src == dst then\
+        return false, \"source and destination are the same\"\
+    end\
+    if srcType == \"directory\" and dst:sub(1, #src + 1) == src:gsub(\"/$\", \"\") .. \"/\" then\
+        return false, \"cannot copy directory into itself\"\
+    end\
+    local dstType = syscall.type(dst)\
+    if dstType then\
+        if not force then\
+            return false, \"destination exists: \" .. dst\
+        end\
+        local removed, why = removePath(cwd, dst, true, true)\
+        if not removed then\
+            return false, why\
+        end\
+    end\
+    if srcType == \"directory\" then\
+        if not recursive then\
+            return false, \"omitting directory: \" .. src\
+        end\
+        local ok, why = pcall(syscall.mkdir, dst .. \"/\")\
+        if not ok then\
+            return false, cleanError(why)\
+        end\
+        local okList, list = pcall(syscall.listdir, src)\
+        if not okList then\
+            return false, cleanError(list)\
+        end\
+        for _, name in ipairs(list or {}) do\
+            local copied, copyErr = copyPath(cwd, join(src, name), join(dst, name), true, force)\
+            if not copied then\
+                return false, copyErr\
+            end\
+        end\
+        return true\
+    elseif srcType == \"file\" then\
+        return copyFile(src, dst)\
+    end\
+    return false, \"unsupported file type: \" .. tostring(srcType)\
+end\
+\
+local function movePath(cwd, src, dst, force)\
+    local copied, why = copyPath(cwd, src, dst, true, force)\
+    if not copied then\
+        return false, why\
+    end\
+    return removePath(cwd, src, true, true)\
+end\
+\
+local function pushLine(st, line)\
+    if (st.scroll or 0) > 0 then\
+        st.scroll = st.scroll + 1\
+    end\
+    if type(line) == \"table\" and type(line.cells) == \"table\" then\
+        st.lines[#st.lines + 1] = line\
+    else\
+        st.lines[#st.lines + 1] = lineFromText(line, st.fg or defaultFg, st.bg or defaultBg)\
+    end\
+    while #st.lines > st.maxLines do\
+        table.remove(st.lines, 1)\
+        if (st.scroll or 0) > 0 then\
+            st.scroll = st.scroll - 1\
+        end\
+    end\
+end\
+\
+local function partialText(st)\
+    return cellsText(st.partialCells or {})\
+end\
+\
+local function lineCount(st)\
+    if st.job and st.job.shell and st.partialIsPrompt then\
+        return #st.lines\
+    end\
+    if partialText(st) ~= \"\" then\
+        return #st.lines + 1\
+    end\
+    return #st.lines\
+end\
+\
+local function updatePromptState(st)\
+    local partial = partialText(st)\
+    st.partial = partial\
+    local cwd = partial:match(\"^%S+@%S+%s+(/%S*)%$%s*$\")\
+    st.partialIsPrompt = cwd ~= nil\
+    if cwd then\
+        st.cwd = cwd\
+    end\
+end\
+\
+local function visibleRows(height)\
+    local rowH = 7\
+    local y0 = 20\
+    local promptY = math.max(y0, height - 10)\
+    return math.max(1, math.floor((promptY - y0) / rowH))\
+end\
+\
+local function maxScroll(st, rows)\
+    return math.max(0, lineCount(st) - rows)\
+end\
+\
+local function clampScroll(st, rows)\
+    st.scroll = math.max(0, math.min(st.scroll or 0, maxScroll(st, rows)))\
+    return st.scroll\
+end\
+\
+local function scrollHistory(st, rows, delta)\
+    local before = st.scroll or 0\
+    st.scroll = before + delta\
+    clampScroll(st, rows)\
+    return st.scroll ~= before\
+end\
+\
+local function pushWrapped(st, line, chars)\
+    line = tostring(line or \"\")\
+    chars = math.max(8, chars or 40)\
+    if line == \"\" then\
+        pushLine(st, \"\")\
+        return\
+    end\
+    while #line > chars do\
+        pushLine(st, line:sub(1, chars))\
+        line = line:sub(chars + 1)\
+    end\
+    pushLine(st, line)\
+end\
+\
+local function pushWrappedCells(st, cells, chars)\
+    cells = cells or {}\
+    chars = math.max(8, chars or 40)\
+    if #cells == 0 then\
+        pushLine(st, { cells = {} })\
+        return\
+    end\
+    local i = 1\
+    while i <= #cells do\
+        pushLine(st, { cells = cloneCells(cells, i, math.min(#cells, i + chars - 1)) })\
+        i = i + chars\
+    end\
+end\
+\
+local function resetTerminalAttrs(st)\
+    st.fg = defaultFg\
+    st.bg = defaultBg\
+end\
+\
+local function ensurePartial(st)\
+    if type(st.partialCells) ~= \"table\" then\
+        st.partialCells = {}\
+        local text = tostring(st.partial or \"\")\
+        for i = 1, #text do\
+            st.partialCells[i] = makeCell(text:sub(i, i), st.fg or defaultFg, st.bg or defaultBg)\
+        end\
+    end\
+    st.partialCursor = math.max(1, math.min(tonumber(st.partialCursor) or (#st.partialCells + 1), #st.partialCells + 1))\
+end\
+\
+local function syncPartial(st)\
+    st.partial = partialText(st)\
+    updatePromptState(st)\
+end\
+\
+local function moveTerminalCursor(st, row, col)\
+    row = math.max(1, math.floor(tonumber(row) or 1))\
+    col = math.max(1, math.floor(tonumber(col) or 1))\
+    if row <= #st.lines then\
+        st.partialCells = cloneCells(st.lines[row].cells or {})\
+        for i = #st.lines, row, -1 do\
+            table.remove(st.lines, i)\
+        end\
+    elseif row > #st.lines + 1 then\
+        while #st.lines < row - 1 do\
+            pushLine(st, { cells = {} })\
+        end\
+        st.partialCells = {}\
+    else\
+        ensurePartial(st)\
+    end\
+    while #st.partialCells < col - 1 do\
+        st.partialCells[#st.partialCells + 1] = makeCell(\" \", st.fg, st.bg)\
+    end\
+    st.partialCursor = col\
+    syncPartial(st)\
+end\
+\
+local function flushPartial(st, chars)\
+    ensurePartial(st)\
+    if #st.partialCells == 0 then\
+        if not st.partialIsPrompt then\
+            pushLine(st, { cells = {} })\
+        end\
+    elseif not st.partialIsPrompt then\
+        pushWrappedCells(st, st.partialCells, chars)\
+    end\
+    st.partialCells = {}\
+    st.partialCursor = 1\
+    st.partial = \"\"\
+    st.partialIsPrompt = false\
+end\
+\
+local function eraseLine(st, mode)\
+    ensurePartial(st)\
+    mode = tonumber(mode) or 0\
+    if mode == 2 then\
+        st.partialCells = {}\
+        st.partialCursor = 1\
+    elseif mode == 1 then\
+        for i = 1, math.min(st.partialCursor, #st.partialCells) do\
+            st.partialCells[i] = makeCell(\" \", st.fg, st.bg)\
+        end\
+    else\
+        for i = #st.partialCells, st.partialCursor, -1 do\
+            st.partialCells[i] = nil\
+        end\
+    end\
+    syncPartial(st)\
+end\
+\
+local function writeTerminalChar(st, ch, chars)\
+    ensurePartial(st)\
+    local pos = st.partialCursor\
+    while #st.partialCells < pos - 1 do\
+        st.partialCells[#st.partialCells + 1] = makeCell(\" \", st.fg, st.bg)\
+    end\
+    st.partialCells[pos] = makeCell(ch, st.fg, st.bg)\
+    st.partialCursor = pos + 1\
+    if st.partialCursor > chars then\
+        pushWrappedCells(st, st.partialCells, chars)\
+        st.partialCells = {}\
+        st.partialCursor = 1\
+        st.partial = \"\"\
+        st.partialIsPrompt = false\
+        return\
+    end\
+    syncPartial(st)\
+end\
+\
+local function parseParams(text)\
+    local params = {}\
+    text = tostring(text or \"\")\
+    if text == \"\" then\
+        return params\
+    end\
+    for item in (text .. \";\"):gmatch(\"([^;]*);\") do\
+        params[#params + 1] = item == \"\" and 0 or (tonumber(item) or 0)\
+    end\
+    return params\
+end\
+\
+local function applySgr(st, params)\
+    if #params == 0 then\
+        params[1] = 0\
+    end\
+    local i = 1\
+    while i <= #params do\
+        local p = params[i]\
+        if p == 0 then\
+            resetTerminalAttrs(st)\
+        elseif p == 39 then\
+            st.fg = defaultFg\
+        elseif p == 49 then\
+            st.bg = defaultBg\
+        elseif ansiBasic[p] then\
+            st.fg = ansiBasic[p]\
+        elseif p >= 40 and p <= 47 then\
+            st.bg = ansiBasic[p - 10] or st.bg\
+        elseif p >= 100 and p <= 107 then\
+            st.bg = ansiBasic[p - 10] or st.bg\
+        elseif (p == 38 or p == 48) and params[i + 1] == 2 then\
+            local r, g, b = params[i + 2], params[i + 3], params[i + 4]\
+            local idx = nearestPalette((r or 0) * 0x10000 + (g or 0) * 0x100 + (b or 0))\
+            if p == 38 then\
+                st.fg = idx\
+            else\
+                st.bg = idx\
+            end\
+            i = i + 4\
+        end\
+        i = i + 1\
+    end\
+end\
+\
+local function handleCsi(st, paramsText, final, chars)\
+    local params = parseParams(paramsText)\
+    if final == \"m\" then\
+        applySgr(st, params)\
+    elseif final == \"K\" then\
+        eraseLine(st, params[1] or 0)\
+    elseif final == \"J\" then\
+        if (params[1] or 0) == 2 then\
+            st.lines = {}\
+            st.scroll = 0\
+            st.partialCells = {}\
+            st.partialCursor = 1\
+            st.partial = \"\"\
+            st.partialIsPrompt = false\
+        end\
+    elseif final == \"C\" then\
+        ensurePartial(st)\
+        st.partialCursor = math.min(#st.partialCells + 1, st.partialCursor + math.max(1, params[1] or 1))\
+    elseif final == \"D\" then\
+        ensurePartial(st)\
+        st.partialCursor = math.max(1, st.partialCursor - math.max(1, params[1] or 1))\
+    elseif final == \"G\" then\
+        ensurePartial(st)\
+        st.partialCursor = math.max(1, math.min(#st.partialCells + 1, params[1] or 1))\
+    elseif final == \"H\" or final == \"f\" then\
+        moveTerminalCursor(st, params[1] or 1, params[2] or 1)\
+    end\
+    syncPartial(st)\
+end\
+\
+local commands = {}\
+\
+commands.help = function(st, args, out)\
+    out(\"commands: help clear pwd cd ls cat stat echo whoami hostname mk touch mkdir rm cp mv\")\
+    out(\"external commands run through /dev/pts\")\
+    out(\"keys: enter run  up/down history  ctrl+up/down scroll\")\
+end\
+\
+commands.clear = function(st)\
+    st.lines = {}\
+    st.scroll = 0\
+end\
+\
+commands.pwd = function(st, args, out)\
+    out(st.cwd)\
+end\
+\
+commands.cd = function(st, args, out)\
+    local target = args[2] or (syscall.getEnviron and syscall.getEnviron(\"HOME\")) or \"/\"\
+    target = normalize(st.cwd, target)\
+    if syscall.type(target) ~= \"directory\" then\
+        out(\"cd: no such directory: \" .. target)\
+        return\
+    end\
+    st.cwd = target\
+end\
+\
+commands.ls = function(st, args, out)\
+    local target = normalize(st.cwd, args[2] or st.cwd)\
+    if syscall.type(target) ~= \"directory\" then\
+        out(\"ls: not a directory: \" .. target)\
+        return\
+    end\
+    local ok, list = pcall(syscall.listdir, target)\
+    if not ok or not list then\
+        out(\"ls: cannot read: \" .. target)\
+        return\
+    end\
+    table.sort(list)\
+    if #list == 0 then\
+        out(\"(empty)\")\
+        return\
+    end\
+    local line = \"\"\
+    for _, name in ipairs(list) do\
+        local suffix = syscall.type(join(target, name)) == \"directory\" and \"/\" or \"\"\
+        local item = name .. suffix\
+        if #line + #item + 2 > 54 then\
+            out(line)\
+            line = item\
+        elseif line == \"\" then\
+            line = item\
+        else\
+            line = line .. \"  \" .. item\
+        end\
+    end\
+    if line ~= \"\" then\
+        out(line)\
+    end\
+end\
+\
+commands.cat = function(st, args, out)\
+    if not args[2] then\
+        out(\"cat: missing file\")\
+        return\
+    end\
+    local path = normalize(st.cwd, args[2])\
+    if syscall.type(path) ~= \"file\" then\
+        out(\"cat: not a file: \" .. path)\
+        return\
+    end\
+    local ok, fd = pcall(syscall.open, path, \"r\")\
+    if not ok then\
+        out(\"cat: \" .. tostring(fd))\
+        return\
+    end\
+    local okRead, data = pcall(syscall.read, fd, 2048)\
+    pcall(syscall.close, fd)\
+    if not okRead then\
+        out(\"cat: \" .. tostring(data))\
+        return\
+    end\
+    data = data or \"\"\
+    local count = 0\
+    for line in (data .. \"\\n\"):gmatch(\"([^\\n]*)\\n\") do\
+        out(line)\
+        count = count + 1\
+        if count >= 12 then\
+            out(\"(truncated)\")\
+            break\
+        end\
+    end\
+end\
+\
+commands.stat = function(st, args, out)\
+    if not args[2] then\
+        out(\"stat: missing path\")\
+        return\
+    end\
+    local path = normalize(st.cwd, args[2])\
+    local t = syscall.type(path)\
+    if not t then\
+        out(\"stat: no such path: \" .. path)\
+        return\
+    end\
+    local ok, info = pcall(syscall.stat, path)\
+    info = ok and info or {}\
+    out(\"path: \" .. path)\
+    out(\"type: \" .. tostring(t))\
+    out(\"size: \" .. tostring(info.size or 0))\
+    out(\"owner: \" .. tostring(info.owner or 0))\
+end\
+\
+commands.echo = function(st, args, out)\
+    table.remove(args, 1)\
+    out(table.concat(args, \" \"))\
+end\
+\
+commands.whoami = function(st, args, out)\
+    out((syscall.getUsername and syscall.getUsername()) or \"unknown\")\
+end\
+\
+commands.hostname = function(st, args, out)\
+    out((syscall.getHostname and syscall.getHostname()) or \"unknown\")\
+end\
+\
+commands.mk = function(st, args, out)\
+    if #args < 2 then\
+        out(\"mk: missing operand\")\
+        return\
+    end\
+    for i = 2, #args do\
+        local ok, why = makePath(st.cwd, args[i], \"auto\")\
+        if not ok then\
+            out(\"mk: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+commands.touch = function(st, args, out)\
+    if #args < 2 then\
+        out(\"touch: missing operand\")\
+        return\
+    end\
+    for i = 2, #args do\
+        local ok, why = makePath(st.cwd, args[i], \"file\")\
+        if not ok then\
+            out(\"touch: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+commands.mkdir = function(st, args, out)\
+    if #args < 2 then\
+        out(\"mkdir: missing operand\")\
+        return\
+    end\
+    for i = 2, #args do\
+        local ok, why = makePath(st.cwd, args[i], \"directory\")\
+        if not ok then\
+            out(\"mkdir: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+commands.rm = function(st, args, out)\
+    local recursive = false\
+    local force = false\
+    local targets = {}\
+    for i = 2, #args do\
+        local arg = args[i]\
+        if arg == \"--\" then\
+            for j = i + 1, #args do\
+                targets[#targets + 1] = args[j]\
+            end\
+            break\
+        elseif arg:sub(1, 1) == \"-\" and #arg > 1 then\
+            for j = 2, #arg do\
+                local flag = arg:sub(j, j)\
+                if flag == \"r\" or flag == \"R\" then\
+                    recursive = true\
+                elseif flag == \"f\" then\
+                    force = true\
+                else\
+                    out(\"rm: unknown option -\" .. flag)\
+                    return\
+                end\
+            end\
+        else\
+            targets[#targets + 1] = arg\
+        end\
+    end\
+    if #targets == 0 then\
+        if not force then\
+            out(\"rm: missing operand\")\
+        end\
+        return\
+    end\
+    for _, target in ipairs(targets) do\
+        local ok, why = removePath(st.cwd, target, recursive, force)\
+        if not ok then\
+            out(\"rm: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+commands.cp = function(st, args, out)\
+    local recursive = false\
+    local force = false\
+    local paths = {}\
+    for i = 2, #args do\
+        local arg = args[i]\
+        if arg == \"--\" then\
+            for j = i + 1, #args do\
+                paths[#paths + 1] = args[j]\
+            end\
+            break\
+        elseif arg:sub(1, 1) == \"-\" and #arg > 1 then\
+            for j = 2, #arg do\
+                local flag = arg:sub(j, j)\
+                if flag == \"r\" or flag == \"R\" then\
+                    recursive = true\
+                elseif flag == \"f\" then\
+                    force = true\
+                else\
+                    out(\"cp: unknown option -\" .. flag)\
+                    return\
+                end\
+            end\
+        else\
+            paths[#paths + 1] = arg\
+        end\
+    end\
+    if #paths < 2 then\
+        out(\"cp: missing operand\")\
+        return\
+    end\
+    local dest = paths[#paths]\
+    if #paths > 2 and syscall.type(normalize(st.cwd, dest)) ~= \"directory\" then\
+        out(\"cp: target is not a directory: \" .. dest)\
+        return\
+    end\
+    for i = 1, #paths - 1 do\
+        local ok, why = copyPath(st.cwd, paths[i], dest, recursive, force)\
+        if not ok then\
+            out(\"cp: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+commands.mv = function(st, args, out)\
+    local force = false\
+    local paths = {}\
+    for i = 2, #args do\
+        local arg = args[i]\
+        if arg == \"--\" then\
+            for j = i + 1, #args do\
+                paths[#paths + 1] = args[j]\
+            end\
+            break\
+        elseif arg:sub(1, 1) == \"-\" and #arg > 1 then\
+            for j = 2, #arg do\
+                local flag = arg:sub(j, j)\
+                if flag == \"f\" then\
+                    force = true\
+                else\
+                    out(\"mv: unknown option -\" .. flag)\
+                    return\
+                end\
+            end\
+        else\
+            paths[#paths + 1] = arg\
+        end\
+    end\
+    if #paths < 2 then\
+        out(\"mv: missing operand\")\
+        return\
+    end\
+    local dest = paths[#paths]\
+    if #paths > 2 and syscall.type(normalize(st.cwd, dest)) ~= \"directory\" then\
+        out(\"mv: target is not a directory: \" .. dest)\
+        return\
+    end\
+    for i = 1, #paths - 1 do\
+        local ok, why = movePath(st.cwd, paths[i], dest, force)\
+        if not ok then\
+            out(\"mv: \" .. tostring(why))\
+        end\
+    end\
+end\
+\
+local function splitPath(path)\
+    local out = {}\
+    for part in tostring(path or \"\"):gmatch(\"[^:]+\") do\
+        out[#out + 1] = part\
+    end\
+    return out\
+end\
+\
+local function executable(path)\
+    if not path or syscall.type(path) ~= \"file\" then\
+        return false\
+    end\
+    local ok = pcall(syscall.access, path, \"x\")\
+    return ok\
+end\
+\
+local function resolveExecutable(st, command)\
+    if command:find(\"/\", 1, true) then\
+        local path = normalize(st.cwd, command)\
+        if executable(path) then\
+            return path\
+        end\
+        return nil\
+    end\
+    local pathEnv = (syscall.getEnviron and syscall.getEnviron(\"PATH\")) or \"/bin/\"\
+    for _, dir in ipairs(splitPath(pathEnv)) do\
+        local path = dir:gsub(\"/$\", \"\") .. \"/\" .. command\
+        if executable(path) then\
+            return path\
+        end\
+    end\
+    local localPath = normalize(st.cwd, command)\
+    if executable(localPath) then\
+        return localPath\
+    end\
+    return nil\
+end\
+\
+local function consumeOutput(st, data, chars)\
+    local changed = false\
+    data = tostring(st.escapePending or \"\") .. tostring(data or \"\")\
+    st.escapePending = nil\
+    ensurePartial(st)\
+    local i = 1\
+    while i <= #data do\
+        local ch = data:sub(i, i)\
+        if ch == \"\\12\" then\
+            st.lines = {}\
+            st.partialCells = {}\
+            st.partialCursor = 1\
+            st.partial = \"\"\
+            st.partialIsPrompt = false\
+            st.scroll = 0\
+            changed = true\
+        elseif ch == \"\\n\" then\
+            flushPartial(st, chars)\
+            changed = true\
+        elseif ch == \"\\r\" then\
+            st.partialCursor = 1\
+            syncPartial(st)\
+            changed = true\
+        elseif ch == \"\\b\" then\
+            st.partialCursor = math.max(1, st.partialCursor - 1)\
+            if st.partialCursor <= #st.partialCells then\
+                table.remove(st.partialCells, st.partialCursor)\
+            end\
+            syncPartial(st)\
+            changed = true\
+        elseif ch == \"\\t\" then\
+            local spaces = 4 - ((st.partialCursor - 1) % 4)\
+            for _ = 1, spaces do\
+                writeTerminalChar(st, \" \", chars)\
+            end\
+            changed = true\
+        elseif ch == \"\\27\" then\
+            if data:sub(i + 1, i + 1) ~= \"[\" then\
+                if i == #data then\
+                    st.escapePending = data:sub(i)\
+                    break\
+                end\
+            else\
+                local j = i + 2\
+                while j <= #data do\
+                    local code = data:byte(j)\
+                    if code and code >= 0x40 and code <= 0x7E then\
+                        handleCsi(st, data:sub(i + 2, j - 1), data:sub(j, j), chars)\
+                        i = j\
+                        changed = true\
+                        break\
+                    end\
+                    j = j + 1\
+                end\
+                if j > #data then\
+                    st.escapePending = data:sub(i)\
+                    break\
+                end\
+            end\
+        else\
+            writeTerminalChar(st, ch, chars)\
+            changed = true\
+        end\
+        i = i + 1\
+    end\
+    return changed\
+end\
+\
+local function startExternal(st, args, out)\
+    local executablePath = resolveExecutable(st, args[1])\
+    if not executablePath then\
+        out(args[1] .. \": command not found\")\
+        return\
+    end\
+    local childArgs = {}\
+    for i = 2, #args do\
+        childArgs[#childArgs + 1] = args[i]\
+    end\
+    local opened, session = pcall(pty.open, 80, 24)\
+    if not opened or not session then\
+        out(args[1] .. \": pty unavailable: \" .. tostring(session))\
+        return\
+    end\
+    local ok, pidOrErr = pcall(pty.spawn, session, executablePath, childArgs)\
+    if not ok then\
+        pty.close(session)\
+        out(args[1] .. \": \" .. tostring(pidOrErr))\
+        return\
+    end\
+    st.job = {\
+        pty = session,\
+        pid = pidOrErr,\
+        command = args[1],\
+    }\
+end\
+\
+local function shellEnv(st)\
+    local env = {}\
+    for _, key in ipairs({ \"HOME\", \"USER\", \"PATH\", \"TERM\" }) do\
+        local ok, value = pcall(syscall.getEnviron, key)\
+        if ok and value then\
+            env[key] = value\
+        end\
+    end\
+    env.SHELL = \"/bin/gsh\"\
+    env.TERM = env.TERM or \"hyperion-gfx\"\
+    env.PWD = st.cwd\
+    env.GSH_CWD = st.cwd\
+    return env\
+end\
+\
+local function startShell(st, width, height)\
+    if st.job then\
+        return false\
+    end\
+    width = tonumber(width) or 120\
+    height = tonumber(height) or 80\
+    local path = resolveExecutable(st, \"gsh\") or \"/bin/gsh\"\
+    if syscall.type(path) ~= \"file\" then\
+        pushWrapped(st, \"gsh: /bin/gsh not found\", math.max(8, math.floor((width - 10) / 4)))\
+        return false\
+    end\
+    local cols = math.max(20, math.floor((width - 10) / 4))\
+    local rows = math.max(4, visibleRows(height))\
+    local opened, session = pcall(pty.open, cols, rows)\
+    if not opened or not session then\
+        pushWrapped(st, \"gsh: pty unavailable: \" .. tostring(session), cols)\
+        return false\
+    end\
+    local ok, pidOrErr = pcall(pty.spawn, session, path, {}, shellEnv(st))\
+    if not ok then\
+        pty.close(session)\
+        pushWrapped(st, \"gsh: \" .. tostring(pidOrErr), cols)\
+        return false\
+    end\
+    st.job = {\
+        pty = session,\
+        pid = pidOrErr,\
+        command = \"gsh\",\
+        shell = true,\
+    }\
+    st.shellStopped = false\
+    st.input = \"\"\
+    st.inputCursor = 1\
+    st.partial = \"\"\
+    st.partialCells = {}\
+    st.partialCursor = 1\
+    st.partialIsPrompt = false\
+    resetTerminalAttrs(st)\
+    return true\
+end\
+\
+local function runCommand(st, line, chars)\
+    st.scroll = 0\
+    pushWrapped(st, \"$ \" .. line, chars)\
+    local args = split(line)\
+    if #args == 0 then\
+        return\
+    end\
+    local cmd = commands[args[1]]\
+    local function out(text)\
+        pushWrapped(st, text, chars)\
+    end\
+    if cmd then\
+        local ok, err = pcall(cmd, st, args, out)\
+        if not ok then\
+            out(args[1] .. \": \" .. tostring(err))\
+        end\
+    else\
+        startExternal(st, args, out)\
+    end\
+end\
+\
+local function drawTerminalLine(ctx, x, y, line, maxChars)\
+    maxChars = math.max(0, math.floor(tonumber(maxChars) or 0))\
+    if type(line) ~= \"table\" or type(line.cells) ~= \"table\" then\
+        ui.text(ctx, x, y, ui.truncate(line, maxChars), 11, { maxWidth = ctx.width - x - 5 })\
+        return\
+    end\
+\
+    local charW = ui.textWidth(\" \", { scale = 1 })\
+    for i = 1, math.min(#line.cells, maxChars) do\
+        local cell = line.cells[i]\
+        local cx = x + (i - 1) * charW\
+        if cell and cell.bg and cell.bg ~= 0 then\
+            ctx.surface:rect(cx, y - 1, charW, 7, cell.bg)\
+        end\
+        if cell and cell.ch ~= \" \" then\
+            ui.text(ctx, cx, y, cell.ch, cell.fg or 11, { maxWidth = charW })\
+        end\
+    end\
+end\
+\
+local function clampInputCursor(st)\
+    st.input = tostring(st.input or \"\")\
+    st.inputCursor = math.max(1, math.min(tonumber(st.inputCursor) or (#st.input + 1), #st.input + 1))\
+end\
+\
+local function insertInput(st, ch)\
+    clampInputCursor(st)\
+    st.input = st.input:sub(1, st.inputCursor - 1) .. ch .. st.input:sub(st.inputCursor)\
+    st.inputCursor = st.inputCursor + #ch\
+end\
+\
+local function backspaceInput(st)\
+    clampInputCursor(st)\
+    if st.inputCursor <= 1 then\
+        return\
+    end\
+    st.input = st.input:sub(1, st.inputCursor - 2) .. st.input:sub(st.inputCursor)\
+    st.inputCursor = st.inputCursor - 1\
+end\
+\
+local function deleteInput(st)\
+    clampInputCursor(st)\
+    if st.inputCursor <= #st.input then\
+        st.input = st.input:sub(1, st.inputCursor - 1) .. st.input:sub(st.inputCursor + 1)\
+    end\
+end\
+\
+local function setInput(st, text)\
+    st.input = tostring(text or \"\")\
+    st.inputCursor = #st.input + 1\
+end\
+\
+local function draw(ctx)\
+    local st = ctx.state\
+    local s = ctx.surface\
+    s:clear(0)\
+    ui.raised(ctx, 0, 0, ctx.width, ctx.height, { bg = 0, light = 3, shadow = 10 })\
+    ui.text(ctx, 5, 5, \"terminal\", 5, { maxWidth = ctx.width - 10 })\
+    ui.text(ctx, 46, 5, ui.truncate(st.cwd, math.floor((ctx.width - 52) / 4)), 11, { maxWidth = ctx.width - 52 })\
+    ui.separator(ctx, 4, 15, ctx.width - 8, { color = 3 })\
+\
+    local rowH = 7\
+    local y0 = 20\
+    local promptY = math.max(y0, ctx.height - 10)\
+    local rows = visibleRows(ctx.height)\
+    local scroll = clampScroll(st, rows)\
+    local total = lineCount(st)\
+    local last = math.max(0, total - scroll)\
+    local first = math.max(1, last - rows + 1)\
+    local y = y0\
+    local chars = math.max(8, math.floor((ctx.width - 10) / 4))\
+    for i = first, last do\
+        local line = i <= #st.lines and st.lines[i] or (st.partialIsPrompt and \"\" or { cells = st.partialCells or {} })\
+        drawTerminalLine(ctx, 5, y, line, chars)\
+        y = y + rowH\
+    end\
+\
+    if maxScroll(st, rows) > 0 then\
+        local trackH = math.max(8, promptY - y0 - 1)\
+        local thumbH = math.max(3, math.floor(trackH * math.min(1, rows / math.max(rows, total))))\
+        local travel = math.max(1, trackH - thumbH)\
+        local thumbY = y0 + math.floor(travel * (1 - scroll / math.max(1, maxScroll(st, rows))))\
+        s:rect(ctx.width - 4, y0, 1, trackH, 2)\
+        s:rect(ctx.width - 4, thumbY, 1, thumbH, 5)\
+    end\
+\
+    ui.panel(ctx, 4, promptY - 1, ctx.width - 8, 9, { bg = 1, border = 3 })\
+    local prompt = st.shellStopped and \"[shell stopped] enter/r restart\" or (\"$ \" .. st.input)\
+    ui.text(ctx, 8, promptY + 1, ui.truncate(prompt, chars), 9, { maxWidth = ctx.width - 16 })\
+    if not st.shellStopped and math.floor((syscall.getUptime and syscall.getUptime() or 0) / 500) % 2 == 0 then\
+        local cursorText = \"$ \" .. st.input:sub(1, math.max(0, (st.inputCursor or (#st.input + 1)) - 1))\
+        local cursorX = 8 + ui.textWidth(ui.truncate(cursorText, chars), { scale = 1 })\
+        s:rect(math.min(ctx.width - 9, cursorX), promptY + 1, 1, 5, 9)\
+    end\
+end\
+\
+function terminal.new(opts)\
+    opts = opts or {}\
+    local home = (syscall.getEnviron and syscall.getEnviron(\"HOME\")) or \"/\"\
+    return app.new({\
+        title = opts.title or \"terminal\",\
+        bg = 0,\
+        minWidth = 88,\
+        minHeight = 58,\
+        state = {\
+            cwd = normalize(\"/\", opts.cwd or home),\
+            input = \"\",\
+            inputCursor = 1,\
+            history = {},\
+            historyIndex = 0,\
+            scroll = 0,\
+            job = nil,\
+            partial = \"\",\
+            partialCells = {},\
+            partialCursor = 1,\
+            fg = defaultFg,\
+            bg = defaultBg,\
+            lines = {\
+                lineFromText(\"Hyperion gfx terminal\", 5, 0),\
+                lineFromText(\"type help\", 11, 0),\
+            },\
+            maxLines = 240,\
+        },\
+        init = function(ctx)\
+            startShell(ctx.state, ctx.width, ctx.height)\
+            ctx.invalidate()\
+        end,\
+        resize = function(ctx)\
+            ctx.invalidate()\
+        end,\
+        draw = draw,\
+        key = function(ctx, event)\
+            local st = ctx.state\
+            if event.type == \"key_down\" and not event.held and event.mod and event.mod.ctrl then\
+                if event.name == \"up\" then\
+                    return scrollHistory(st, visibleRows(ctx.height), 1)\
+                elseif event.name == \"down\" then\
+                    return scrollHistory(st, visibleRows(ctx.height), -1)\
+                end\
+            end\
+            if st.shellStopped then\
+                if event.type == \"char\" and tostring(event.char or \"\"):lower() == \"r\" then\
+                    return startShell(st, ctx.width, ctx.height)\
+                end\
+                if event.type == \"key_down\" and not event.held then\
+                    if event.name == \"enter\" or event.name == \"numPadEnter\" or event.name == \"r\" then\
+                        return startShell(st, ctx.width, ctx.height)\
+                    end\
+                end\
+                return false\
+            end\
+            if st.job then\
+                if st.job.shell then\
+                    if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+                        local ch = tostring(event.char or \"\")\
+                        if isBackspaceChar(ch) then\
+                            backspaceInput(st)\
+                        elseif isPrintableChar(ch) then\
+                            insertInput(st, ch)\
+                        end\
+                        return true\
+                    end\
+                    if event.type ~= \"key_down\" or event.held then\
+                        return false\
+                    end\
+                    if event.name == \"enter\" or event.name == \"numPadEnter\" then\
+                        local line = st.input\
+                        if line ~= \"\" then\
+                            st.history[#st.history + 1] = line\
+                        end\
+                        st.historyIndex = 0\
+                        setInput(st, \"\")\
+                        st.scroll = 0\
+                        pty.write(st.job.pty, line .. \"\\n\")\
+                    elseif event.name == \"backspace\" then\
+                        backspaceInput(st)\
+                    elseif event.name == \"delete\" then\
+                        deleteInput(st)\
+                    elseif event.name == \"left\" then\
+                        clampInputCursor(st)\
+                        st.inputCursor = math.max(1, st.inputCursor - 1)\
+                    elseif event.name == \"right\" then\
+                        clampInputCursor(st)\
+                        st.inputCursor = math.min(#st.input + 1, st.inputCursor + 1)\
+                    elseif event.name == \"home\" then\
+                        st.inputCursor = 1\
+                    elseif event.name == \"end\" then\
+                        st.inputCursor = #st.input + 1\
+                    elseif event.name == \"up\" then\
+                        if st.historyIndex < #st.history then\
+                            st.historyIndex = st.historyIndex + 1\
+                            setInput(st, st.history[#st.history - st.historyIndex + 1] or st.input)\
+                        end\
+                    elseif event.name == \"down\" then\
+                        if st.historyIndex > 1 then\
+                            st.historyIndex = st.historyIndex - 1\
+                            setInput(st, st.history[#st.history - st.historyIndex + 1] or \"\")\
+                        elseif st.historyIndex == 1 then\
+                            st.historyIndex = 0\
+                            setInput(st, \"\")\
+                        else\
+                            return false\
+                        end\
+                    else\
+                        return false\
+                    end\
+                    return true\
+                end\
+                if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+                    local ch = tostring(event.char or \"\")\
+                    if isBackspaceChar(ch) then\
+                        pty.write(st.job.pty, \"\\b\")\
+                    elseif isPrintableChar(ch) then\
+                        pty.write(st.job.pty, ch)\
+                    end\
+                    return true\
+                end\
+                if event.type == \"key_down\" and not event.held then\
+                    if event.name == \"enter\" or event.name == \"numPadEnter\" then\
+                        pty.write(st.job.pty, \"\\n\")\
+                        return true\
+                    elseif event.name == \"backspace\" then\
+                        pty.write(st.job.pty, \"\\b\")\
+                        return true\
+                    elseif event.name == \"up\" then\
+                        pty.write(st.job.pty, \"\\27[A\")\
+                        return true\
+                    elseif event.name == \"down\" then\
+                        pty.write(st.job.pty, \"\\27[B\")\
+                        return true\
+                    elseif event.name == \"left\" then\
+                        pty.write(st.job.pty, \"\\27[D\")\
+                        return true\
+                    elseif event.name == \"right\" then\
+                        pty.write(st.job.pty, \"\\27[C\")\
+                        return true\
+                    elseif event.name == \"home\" then\
+                        pty.write(st.job.pty, \"\\27[H\")\
+                        return true\
+                    elseif event.name == \"end\" then\
+                        pty.write(st.job.pty, \"\\27[F\")\
+                        return true\
+                    elseif event.name == \"delete\" then\
+                        pty.write(st.job.pty, \"\\27[3~\")\
+                        return true\
+                    end\
+                end\
+                return false\
+            end\
+            if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+                local ch = tostring(event.char or \"\")\
+                if isBackspaceChar(ch) then\
+                    backspaceInput(st)\
+                elseif isPrintableChar(ch) then\
+                    insertInput(st, ch)\
+                end\
+                return true\
+            end\
+            if event.type ~= \"key_down\" or event.held then\
+                return false\
+            end\
+            local chars = math.max(8, math.floor((ctx.width - 10) / 4))\
+            if event.name == \"enter\" or event.name == \"numPadEnter\" then\
+                local line = st.input\
+                if line ~= \"\" then\
+                    st.history[#st.history + 1] = line\
+                end\
+                st.historyIndex = 0\
+                setInput(st, \"\")\
+                runCommand(st, line, chars)\
+            elseif event.name == \"backspace\" then\
+                backspaceInput(st)\
+            elseif event.name == \"delete\" then\
+                deleteInput(st)\
+            elseif event.name == \"left\" then\
+                clampInputCursor(st)\
+                st.inputCursor = math.max(1, st.inputCursor - 1)\
+            elseif event.name == \"right\" then\
+                clampInputCursor(st)\
+                st.inputCursor = math.min(#st.input + 1, st.inputCursor + 1)\
+            elseif event.name == \"home\" then\
+                st.inputCursor = 1\
+            elseif event.name == \"end\" then\
+                st.inputCursor = #st.input + 1\
+            elseif event.name == \"up\" then\
+                if st.historyIndex < #st.history then\
+                    st.historyIndex = st.historyIndex + 1\
+                    setInput(st, st.history[#st.history - st.historyIndex + 1] or st.input)\
+                end\
+            elseif event.name == \"down\" then\
+                if st.historyIndex > 1 then\
+                    st.historyIndex = st.historyIndex - 1\
+                    setInput(st, st.history[#st.history - st.historyIndex + 1] or \"\")\
+                elseif st.historyIndex == 1 then\
+                    st.historyIndex = 0\
+                    setInput(st, \"\")\
+                else\
+                    return false\
+                end\
+            else\
+                return false\
+            end\
+            return true\
+        end,\
+        tick = function(ctx)\
+            local st = ctx.state\
+            if not st.job then\
+                return false\
+            end\
+            local chars = math.max(8, math.floor((ctx.width - 10) / 4))\
+            local changed = false\
+            local data = pty.read(st.job.pty, 4096)\
+            if data and data ~= \"\" then\
+                changed = consumeOutput(st, data, chars) or changed\
+            end\
+            local info = pty.info(st.job.pty)\
+            if info and info.status == \"Z\" then\
+                local finished = st.job\
+                local ok, exit = pty.collect(st.job.pty)\
+                pty.close(st.job.pty)\
+                if partialText(st) ~= \"\" and not st.partialIsPrompt then\
+                    pushWrappedCells(st, st.partialCells or {}, chars)\
+                end\
+                st.partial = \"\"\
+                st.partialCells = {}\
+                st.partialCursor = 1\
+                st.partialIsPrompt = false\
+                if ok and exit then\
+                    pushWrapped(st, \"[\" .. finished.command .. \" exited \" .. tostring(exit) .. \"]\", chars)\
+                end\
+                if finished.shell then\
+                    pushWrapped(st, \"[press enter or r to restart shell]\", chars)\
+                    st.shellStopped = true\
+                end\
+                st.job = nil\
+                setInput(st, \"\")\
+                changed = true\
+            end\
+            return changed\
+        end,\
+        close = function(ctx)\
+            if ctx.state.job then\
+                pcall(pty.kill, ctx.state.job.pty)\
+                pcall(pty.close, ctx.state.job.pty)\
+                ctx.state.job = nil\
+            end\
+            return true\
+        end,\
+    })\
+end\
+\
+return terminal\
+",
+    },
+    {
+      checksum = "sha256:136084023a4622137cb8191559c14e8c44e1b7515e98719013e79f4a0dbc3837:10876",
+      path = "/usr/lib/compositor.lua",
+      text = "local ui = require(\"ui\")\
+\
+local comp = {}\
+\
+local function clamp(value, min, max)\
+    if value < min then\
+        return min\
+    end\
+    if value > max then\
+        return max\
+    end\
+    return value\
+end\
+\
+local function rectsTouch(a, b)\
+    return a.x <= b.x + b.w and b.x <= a.x + a.w and a.y <= b.y + b.h and b.y <= a.y + a.h\
+end\
+\
+local function unionRect(a, b)\
+    local x1 = math.min(a.x, b.x)\
+    local y1 = math.min(a.y, b.y)\
+    local x2 = math.max(a.x + a.w, b.x + b.w)\
+    local y2 = math.max(a.y + a.h, b.y + b.h)\
+    a.x, a.y, a.w, a.h = x1, y1, x2 - x1, y2 - y1\
+end\
+\
+local function sameBounds(a, b)\
+    return a and b and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h\
+end\
+\
+local function normalizeRect(state, x, y, w, h)\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    w = math.floor(tonumber(w) or 0)\
+    h = math.floor(tonumber(h) or 0)\
+    if x < 0 then\
+        w = w + x\
+        x = 0\
+    end\
+    if y < 0 then\
+        h = h + y\
+        y = 0\
+    end\
+    if state.screenWidth and state.screenWidth > 0 and x + w > state.screenWidth then\
+        w = state.screenWidth - x\
+    end\
+    if state.screenHeight and state.screenHeight > 0 and y + h > state.screenHeight then\
+        h = state.screenHeight - y\
+    end\
+    if w <= 0 or h <= 0 then\
+        return nil\
+    end\
+    return { x = x, y = y, w = w, h = h }\
+end\
+\
+local function textOnGfx(gfx, x, y, text, color, maxWidth)\
+    return ui.text({\
+        surface = {\
+            rect = function(_, rx, ry, rw, rh, c)\
+                return gfx.rect(rx, ry, rw, rh, c)\
+            end,\
+        },\
+    }, x, y, text, color, { maxWidth = maxWidth })\
+end\
+\
+local function readWorldTime()\
+    local root = _G or {}\
+    local sc = root.syscall\
+    if type(sc) == \"table\" and type(sc.world_time) == \"function\" then\
+        local ok, time = pcall(sc.world_time)\
+        if ok and type(time) == \"number\" then\
+            return time\
+        end\
+    end\
+\
+    local clockApi = root.os\
+    if type(clockApi) == \"table\" and type(clockApi.time) == \"function\" then\
+        local ok, time = pcall(clockApi.time)\
+        if ok and type(time) == \"number\" then\
+            return time\
+        end\
+    end\
+    return nil\
+end\
+\
+function comp.panelClockLabel()\
+    local time = readWorldTime()\
+    if type(time) ~= \"number\" then\
+        return \"TIME --:--\"\
+    end\
+    time = time % 24\
+    local hour = math.floor(time)\
+    local minute = math.floor((time - hour) * 60 + 0.5)\
+    if minute >= 60 then\
+        minute = 0\
+        hour = (hour + 1) % 24\
+    end\
+    return string.format(\"TIME %02d:%02d\", hour, minute)\
+end\
+\
+function comp.new(opts)\
+    opts = opts or {}\
+    return {\
+        windows = {},\
+        nextId = 1,\
+        focused = nil,\
+        masterRatio = opts.masterRatio or 0.58,\
+        gap = opts.gap or 4,\
+        panelHeight = opts.panelHeight or 18,\
+        minWidth = opts.minWidth or 42,\
+        minHeight = opts.minHeight or 28,\
+        damage = {},\
+        screenWidth = 0,\
+        screenHeight = 0,\
+    }\
+end\
+\
+function comp.add(state, app)\
+    local id = state.nextId\
+    state.nextId = id + 1\
+    app.id = id\
+    app.title = app.title or (\"app-\" .. tostring(id))\
+    app.minWidth = app.minWidth or state.minWidth\
+    app.minHeight = app.minHeight or state.minHeight\
+    app.visible = app.visible ~= false\
+    app.focused = false\
+    app.x, app.y, app.w, app.h = 0, 0, 0, 0\
+    state.windows[#state.windows + 1] = app\
+    state.focused = id\
+    return id\
+end\
+\
+function comp.remove(state, id)\
+    for i, win in ipairs(state.windows) do\
+        if win.id == id then\
+            table.remove(state.windows, i)\
+            if state.focused == id then\
+                state.focused = state.windows[math.min(i, #state.windows)] and state.windows[math.min(i, #state.windows)].id or nil\
+            end\
+            return true\
+        end\
+    end\
+    return false\
+end\
+\
+function comp.focus(state, id)\
+    for _, win in ipairs(state.windows) do\
+        if win.id == id then\
+            state.focused = id\
+            return true\
+        end\
+    end\
+    return false\
+end\
+\
+function comp.focusNext(state, delta)\
+    local visible = comp.visibleWindows(state)\
+    if #visible == 0 then\
+        state.focused = nil\
+        return nil\
+    end\
+    local idx = 1\
+    for i, win in ipairs(visible) do\
+        if win.id == state.focused then\
+            idx = i\
+            break\
+        end\
+    end\
+    idx = ((idx - 1 + delta) % #visible) + 1\
+    state.focused = visible[idx].id\
+    return state.focused\
+end\
+\
+function comp.adjustMaster(state, delta)\
+    state.masterRatio = clamp(state.masterRatio + delta, 0.25, 0.75)\
+    return state.masterRatio\
+end\
+\
+function comp.visibleWindows(state)\
+    local wins = {}\
+    for _, win in ipairs(state.windows) do\
+        if win.visible then\
+            wins[#wins + 1] = win\
+        end\
+    end\
+    return wins\
+end\
+\
+function comp.rectIntersects(a, b)\
+    return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h\
+end\
+\
+function comp.windowRect(win)\
+    if not win or not win.w or not win.h or win.w <= 0 or win.h <= 0 then\
+        return nil\
+    end\
+    return { x = win.x, y = win.y, w = win.w + 3, h = win.h + 3 }\
+end\
+\
+function comp.damage(state, x, y, w, h)\
+    local rect = normalizeRect(state, x, y, w, h)\
+    if not rect then\
+        return false\
+    end\
+    for _, existing in ipairs(state.damage) do\
+        if rectsTouch(existing, rect) then\
+            unionRect(existing, rect)\
+            return true\
+        end\
+    end\
+    state.damage[#state.damage + 1] = rect\
+    return true\
+end\
+\
+function comp.damageRect(state, rect)\
+    if not rect then\
+        return false\
+    end\
+    return comp.damage(state, rect.x, rect.y, rect.w, rect.h)\
+end\
+\
+function comp.damageAll(state, width, height)\
+    state.screenWidth = width or state.screenWidth\
+    state.screenHeight = height or state.screenHeight\
+    return comp.damage(state, 0, 0, state.screenWidth, state.screenHeight)\
+end\
+\
+function comp.damagePanel(state, width)\
+    return comp.damage(state, 0, 0, width or state.screenWidth, state.panelHeight)\
+end\
+\
+function comp.damageWindow(state, win)\
+    return comp.damageRect(state, comp.windowRect(win))\
+end\
+\
+function comp.hasDamage(state)\
+    return #state.damage > 0\
+end\
+\
+function comp.drainDamage(state)\
+    local damage = state.damage\
+    state.damage = {}\
+    return damage\
+end\
+\
+function comp.snapshot(state)\
+    local snap = {}\
+    for _, win in ipairs(comp.visibleWindows(state)) do\
+        local rect = comp.windowRect(win)\
+        if rect then\
+            snap[win.id] = {\
+                x = rect.x,\
+                y = rect.y,\
+                w = rect.w,\
+                h = rect.h,\
+                focused = win.focused,\
+            }\
+        end\
+    end\
+    return snap\
+end\
+\
+function comp.damageChanges(state, before, width)\
+    before = before or {}\
+    local current = {}\
+    local changed = false\
+    for _, win in ipairs(comp.visibleWindows(state)) do\
+        local rect = comp.windowRect(win)\
+        if rect then\
+            rect.focused = win.focused\
+            current[win.id] = rect\
+        end\
+    end\
+    for id, old in pairs(before) do\
+        local now = current[id]\
+        if not now or not sameBounds(old, now) or old.focused ~= now.focused then\
+            comp.damage(state, old.x, old.y, old.w, old.h)\
+            changed = true\
+        end\
+    end\
+    for id, now in pairs(current) do\
+        local old = before[id]\
+        if not old or not sameBounds(old, now) or old.focused ~= now.focused then\
+            comp.damage(state, now.x, now.y, now.w, now.h)\
+            changed = true\
+        end\
+    end\
+    if changed then\
+        comp.damagePanel(state, width)\
+    end\
+    return changed\
+end\
+\
+local function setGeom(win, x, y, w, h)\
+    win.x = math.floor(x)\
+    win.y = math.floor(y)\
+    win.w = math.max(1, math.floor(w))\
+    win.h = math.max(1, math.floor(h))\
+    win.contentX = win.x + 1\
+    win.contentY = win.y + 1\
+    win.contentW = math.max(1, win.w - 2)\
+    win.contentH = math.max(1, win.h - 2)\
+end\
+\
+function comp.layout(state, width, height)\
+    state.screenWidth = width\
+    state.screenHeight = height\
+\
+    local wins = comp.visibleWindows(state)\
+    for _, win in ipairs(state.windows) do\
+        win.focused = win.id == state.focused\
+    end\
+\
+    local gap = state.gap\
+    local areaX = gap\
+    local areaY = state.panelHeight + gap\
+    local areaW = width - gap * 2\
+    local areaH = height - state.panelHeight - gap * 2\
+\
+    if #wins == 0 then\
+        return wins\
+    end\
+\
+    if #wins == 1 or areaW < state.minWidth * 2 + gap then\
+        setGeom(wins[1], areaX, areaY, areaW, areaH)\
+        return wins\
+    end\
+\
+    local masterW = math.floor((areaW - gap) * state.masterRatio)\
+    local stackW = areaW - gap - masterW\
+    if masterW < state.minWidth then\
+        masterW = state.minWidth\
+        stackW = areaW - gap - masterW\
+    elseif stackW < state.minWidth then\
+        stackW = state.minWidth\
+        masterW = areaW - gap - stackW\
+    end\
+\
+    setGeom(wins[1], areaX, areaY, masterW, areaH)\
+\
+    local stackN = #wins - 1\
+    local stackX = areaX + masterW + gap\
+    local totalGap = gap * (stackN - 1)\
+    local availableH = math.max(stackN, areaH - totalGap)\
+    local y = areaY\
+    for i = 2, #wins do\
+        local remaining = #wins - i + 1\
+        local h = math.floor(availableH / remaining)\
+        if availableH >= wins[i].minHeight * remaining and h < wins[i].minHeight then\
+            h = wins[i].minHeight\
+        end\
+        if i == #wins then\
+            h = math.max(1, areaY + areaH - y)\
+        end\
+        setGeom(wins[i], stackX, y, stackW, h)\
+        y = y + h + gap\
+        availableH = math.max(0, availableH - h)\
+    end\
+    return wins\
+end\
+\
+function comp.drawPanel(state, gfx, width)\
+    gfx.rect(0, 0, width, state.panelHeight, 10)\
+    gfx.rect(0, state.panelHeight - 1, width, 1, 3)\
+    local clock = comp.panelClockLabel()\
+    local clockW = ui.textWidth(clock, { scale = 1 })\
+    local clockX = math.max(4, width - clockW - 7)\
+    gfx.rect(math.max(0, clockX - 4), 4, clockW + 7, 9, 1)\
+    gfx.frame(math.max(0, clockX - 4), 4, clockW + 7, 9, 3)\
+    textOnGfx(gfx, clockX, 6, clock, 9, clockW)\
+    local x = 6\
+    for _, win in ipairs(comp.visibleWindows(state)) do\
+        local w = math.max(18, math.min(60, #win.title * 6))\
+        gfx.rect(x, 5, w, 8, win.focused and 4 or 3)\
+        x = x + w + 5\
+        if x > clockX - 12 then\
+            break\
+        end\
+    end\
+end\
+\
+function comp.drawWindow(gfx, win, drawContent, clip)\
+    local border = win.focused and 9 or 11\
+    gfx.rect(win.x + 3, win.y + 3, win.w, win.h, 10)\
+    gfx.rect(win.x, win.y, win.w, win.h, 2)\
+    gfx.frame(win.x, win.y, win.w, win.h, border)\
+    if win.surface and type(win.surface.blitTo) == \"function\" then\
+        win.surface:blitTo(gfx, win.contentX, win.contentY, clip)\
+    elseif drawContent then\
+        drawContent(gfx, win)\
+    end\
+end\
+\
+return comp\
+",
+    },
+    {
+      checksum = "sha256:8fd75dfda49acf5041af9c1a898269ab8f419e0850be3d098081a76e212af082:6357",
+      path = "/usr/lib/launcher.lua",
+      text = "local surface = require(\"surface\")\
+local ui = require(\"ui\")\
+local registry = require(\"appregistry\")\
+\
+local launcher = {}\
+\
+local function clamp(value, min, max)\
+    if value < min then\
+        return min\
+    end\
+    if value > max then\
+        return max\
+    end\
+    return value\
+end\
+\
+local function unionRect(a, b)\
+    local x1 = math.min(a.x, b.x)\
+    local y1 = math.min(a.y, b.y)\
+    local x2 = math.max(a.x + a.w, b.x + b.w)\
+    local y2 = math.max(a.y + a.h, b.y + b.h)\
+    return { x = x1, y = y1, w = x2 - x1, h = y2 - y1 }\
+end\
+\
+local function isBackspaceChar(ch)\
+    local code = ch and ch:byte(1)\
+    return code == 8 or code == 127\
+end\
+\
+local function isPrintableChar(ch)\
+    if type(ch) ~= \"string\" or #ch ~= 1 then\
+        return false\
+    end\
+    local code = ch:byte(1)\
+    return code >= 32 and code <= 126\
+end\
+\
+local function refresh(state)\
+    state.matches = registry.match(state.query)\
+    if #state.matches == 0 then\
+        state.selected = 0\
+    else\
+        state.selected = clamp(state.selected <= 0 and 1 or state.selected, 1, #state.matches)\
+    end\
+end\
+\
+function launcher.new()\
+    local state = {\
+        open = false,\
+        query = \"\",\
+        selected = 1,\
+        matches = {},\
+        surface = nil,\
+        x = 0,\
+        y = 0,\
+        w = 1,\
+        h = 1,\
+        dirty = false,\
+    }\
+    refresh(state)\
+    return state\
+end\
+\
+function launcher.isOpen(state)\
+    return state and state.open\
+end\
+\
+function launcher.open(state)\
+    state.open = true\
+    state.query = \"\"\
+    state.selected = 1\
+    state.dirty = true\
+    refresh(state)\
+end\
+\
+function launcher.close(state)\
+    state.open = false\
+    state.dirty = true\
+end\
+\
+function launcher.toggle(state)\
+    if state.open then\
+        launcher.close(state)\
+    else\
+        launcher.open(state)\
+    end\
+end\
+\
+function launcher.bounds(state, screenW, screenH)\
+    local w = math.min(math.max(100, screenW - 24), 240)\
+    local rows = 6\
+    local h = math.min(screenH - 16, 24 + rows * 12 + 10)\
+    if h < 44 then\
+        h = math.min(screenH, 44)\
+    end\
+    local x = math.max(0, math.floor((screenW - w) / 2))\
+    local y = math.max(0, math.floor((screenH - h) / 3))\
+    state.x, state.y, state.w, state.h = x, y, w, h\
+    return x, y, w, h\
+end\
+\
+function launcher.overlayRect(state, screenW, screenH)\
+    local x, y, w, h = launcher.bounds(state, screenW, screenH)\
+    return { x = x, y = y, w = w, h = h }\
+end\
+\
+function launcher.damageRect(state, screenW, screenH)\
+    if state.open then\
+        local old = { x = state.x or 0, y = state.y or 0, w = state.w or 0, h = state.h or 0 }\
+        local new = launcher.overlayRect(state, screenW, screenH)\
+        if old.w <= 1 and old.h <= 1 then\
+            return new\
+        end\
+        return unionRect(old, new)\
+    end\
+    return { x = state.x or 0, y = state.y or 0, w = state.w or screenW, h = state.h or screenH }\
+end\
+\
+local function moveSelection(state, delta)\
+    if #state.matches == 0 then\
+        state.selected = 0\
+        return\
+    end\
+    state.selected = ((state.selected - 1 + delta) % #state.matches) + 1\
+end\
+\
+local function backspace(query)\
+    if #query == 0 then\
+        return query\
+    end\
+    return query:sub(1, #query - 1)\
+end\
+\
+function launcher.key(state, event)\
+    if not state.open then\
+        return false, nil\
+    end\
+\
+    local launched = nil\
+    if event.type == \"char\" and not (event.mod and (event.mod.ctrl or event.mod.alt)) then\
+        local ch = tostring(event.char or \"\")\
+        if isBackspaceChar(ch) then\
+            state.query = backspace(state.query)\
+            state.selected = 1\
+            refresh(state)\
+            state.dirty = true\
+        elseif isPrintableChar(ch) then\
+            state.query = state.query .. ch\
+            state.selected = 1\
+            refresh(state)\
+            state.dirty = true\
+        end\
+        return true, nil\
+    end\
+\
+    if event.type ~= \"key_down\" or event.held then\
+        return true, nil\
+    end\
+\
+    local name = event.name\
+    if name == \"escape\" or name == \"delete\" then\
+        launcher.close(state)\
+    elseif name == \"backspace\" then\
+        state.query = backspace(state.query)\
+        state.selected = 1\
+        refresh(state)\
+    elseif name == \"up\" then\
+        moveSelection(state, -1)\
+    elseif name == \"down\" or name == \"tab\" then\
+        moveSelection(state, 1)\
+    elseif name == \"enter\" or name == \"numPadEnter\" then\
+        local entry = state.matches[state.selected]\
+        if entry then\
+            launched = registry.launch(entry)\
+            launcher.close(state)\
+        end\
+    end\
+\
+    state.dirty = true\
+    return true, launched\
+end\
+\
+function launcher.render(state, gfx, screenW, screenH)\
+    if not state.open then\
+        return false\
+    end\
+    local x, y, w, h = launcher.bounds(state, screenW, screenH)\
+    if not state.surface or state.surface.w ~= w or state.surface.h ~= h then\
+        state.surface = surface.new(w, h, 10)\
+    else\
+        state.surface:clear(10)\
+    end\
+\
+    local ctx = { surface = state.surface, width = w, height = h, state = state }\
+    ui.raised(ctx, 0, 0, w, h, { bg = 10, light = 11, shadow = 0 })\
+    ui.text(ctx, 8, 6, \"run\", 11, { scale = 1, maxWidth = w - 16 })\
+    ui.panel(ctx, 26, 4, math.max(20, w - 34), 12, { bg = 1, border = 3 })\
+    local query = state.query ~= \"\" and state.query or \"type to search\"\
+    ui.text(ctx, 31, 7, query, state.query ~= \"\" and 9 or 11, { scale = 1, maxWidth = w - 44 })\
+\
+    local rowY = 22\
+    local rowH = 10\
+    local maxRows = math.max(1, math.floor((h - rowY - 5) / rowH))\
+    for i = 1, math.min(maxRows, #state.matches) do\
+        local entry = state.matches[i]\
+        local selected = i == state.selected\
+        local yy = rowY + (i - 1) * rowH\
+        state.surface:rect(5, yy, w - 10, rowH - 1, selected and 4 or 2)\
+        state.surface:rect(8, yy + 3, 4, 3, entry.color or 11)\
+        ui.text(ctx, 16, yy + 2, entry.name, selected and 15 or 11, { scale = 1, maxWidth = math.floor((w - 26) * 0.45) })\
+        ui.text(ctx, math.floor(w * 0.48), yy + 2, entry.description or \"\", selected and 15 or 3, {\
+            scale = 1,\
+            maxWidth = math.floor(w * 0.48),\
+        })\
+    end\
+\
+    if #state.matches == 0 then\
+        ui.text(ctx, 8, rowY + 2, \"no matches\", 7, { scale = 1, maxWidth = w - 16 })\
+    end\
+\
+    state.surface:blitTo(gfx, x, y)\
+    state.dirty = false\
+    return true\
+end\
+\
+return launcher\
+",
+    },
+    {
+      checksum = "sha256:2ee6085ff1569288c0c64ba35d847b39d5cf7ad55cf2662934e6a9474c577860:4478",
+      path = "/usr/lib/surface.lua",
+      text = "local surface = {}\
+\
+local Surface = {}\
+Surface.__index = Surface\
+\
+local function clampRect(sw, sh, x, y, w, h)\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    w = math.floor(tonumber(w) or 0)\
+    h = math.floor(tonumber(h) or 0)\
+    if x < 0 then\
+        w = w + x\
+        x = 0\
+    end\
+    if y < 0 then\
+        h = h + y\
+        y = 0\
+    end\
+    if x + w > sw then\
+        w = sw - x\
+    end\
+    if y + h > sh then\
+        h = sh - y\
+    end\
+    if w <= 0 or h <= 0 then\
+        return nil\
+    end\
+    return x, y, w, h\
+end\
+\
+local function makePixels(w, h, color)\
+    local pixels = {}\
+    for i = 1, w * h do\
+        pixels[i] = color\
+    end\
+    return pixels\
+end\
+\
+local function indexOf(self, x, y)\
+    return y * self.w + x + 1\
+end\
+\
+function surface.new(w, h, bg)\
+    w = math.max(1, math.floor(tonumber(w) or 1))\
+    h = math.max(1, math.floor(tonumber(h) or 1))\
+    bg = bg or 0\
+    return setmetatable({\
+        w = w,\
+        h = h,\
+        bg = bg,\
+        pixels = makePixels(w, h, bg),\
+        dirty = true,\
+    }, Surface)\
+end\
+\
+function Surface:size()\
+    return self.w, self.h\
+end\
+\
+function Surface:resize(w, h, bg)\
+    w = math.max(1, math.floor(tonumber(w) or 1))\
+    h = math.max(1, math.floor(tonumber(h) or 1))\
+    bg = bg or self.bg\
+    if self.w == w and self.h == h and self.bg == bg then\
+        return false\
+    end\
+    self.w = w\
+    self.h = h\
+    self.bg = bg\
+    self.pixels = makePixels(w, h, bg)\
+    self.dirty = true\
+    return true\
+end\
+\
+function Surface:clear(color)\
+    color = color or self.bg\
+    self.pixels = makePixels(self.w, self.h, color)\
+    self.dirty = true\
+end\
+\
+function Surface:pixel(x, y, color)\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    if x < 0 or y < 0 or x >= self.w or y >= self.h then\
+        return false\
+    end\
+    self.pixels[indexOf(self, x, y)] = color or 0\
+    self.dirty = true\
+    return true\
+end\
+\
+function Surface:getPixel(x, y)\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+    if x < 0 or y < 0 or x >= self.w or y >= self.h then\
+        return nil\
+    end\
+    return self.pixels[indexOf(self, x, y)]\
+end\
+\
+function Surface:rect(x, y, w, h, color)\
+    local rx, ry, rw, rh = clampRect(self.w, self.h, x, y, w, h)\
+    if not rx then\
+        return false\
+    end\
+    color = color or 0\
+    for py = ry, ry + rh - 1 do\
+        local row = py * self.w\
+        for px = rx, rx + rw - 1 do\
+            self.pixels[row + px + 1] = color\
+        end\
+    end\
+    self.dirty = true\
+    return true\
+end\
+\
+function Surface:frame(x, y, w, h, color)\
+    self:rect(x, y, w, 1, color)\
+    self:rect(x, y + h - 1, w, 1, color)\
+    self:rect(x, y, 1, h, color)\
+    self:rect(x + w - 1, y, 1, h, color)\
+end\
+\
+function Surface:line(x1, y1, x2, y2, color)\
+    x1, y1 = math.floor(x1), math.floor(y1)\
+    x2, y2 = math.floor(x2), math.floor(y2)\
+    local dx = math.abs(x2 - x1)\
+    local sx = x1 < x2 and 1 or -1\
+    local dy = -math.abs(y2 - y1)\
+    local sy = y1 < y2 and 1 or -1\
+    local err = dx + dy\
+    while true do\
+        self:pixel(x1, y1, color)\
+        if x1 == x2 and y1 == y2 then\
+            break\
+        end\
+        local e2 = 2 * err\
+        if e2 >= dy then\
+            err = err + dy\
+            x1 = x1 + sx\
+        end\
+        if e2 <= dx then\
+            err = err + dx\
+            y1 = y1 + sy\
+        end\
+    end\
+end\
+\
+function Surface:blitTo(gfx, x, y, clip)\
+    x = math.floor(tonumber(x) or 0)\
+    y = math.floor(tonumber(y) or 0)\
+\
+    local sx0, sy0 = 0, 0\
+    local sx1, sy1 = self.w, self.h\
+    if clip then\
+        sx0 = math.max(0, math.floor((tonumber(clip.x) or 0) - x))\
+        sy0 = math.max(0, math.floor((tonumber(clip.y) or 0) - y))\
+        sx1 = math.min(self.w, math.ceil(((tonumber(clip.x) or 0) + (tonumber(clip.w) or 0)) - x))\
+        sy1 = math.min(self.h, math.ceil(((tonumber(clip.y) or 0) + (tonumber(clip.h) or 0)) - y))\
+    end\
+    if sx0 >= sx1 or sy0 >= sy1 then\
+        return false\
+    end\
+\
+    for sy = sy0, sy1 - 1 do\
+        local sx = sx0\
+        while sx < sx1 do\
+            local color = self.pixels[indexOf(self, sx, sy)] or self.bg\
+            local run = 1\
+            while sx + run < sx1 and self.pixels[indexOf(self, sx + run, sy)] == color do\
+                run = run + 1\
+            end\
+            gfx.rect(x + sx, y + sy, run, 1, color)\
+            sx = sx + run\
+        end\
+    end\
+    self.dirty = false\
+    return true\
+end\
+\
+surface.Surface = Surface\
+\
+return surface\
+",
+    },
+    {
+      checksum = "sha256:13b9f04e1d687019062f70719940befe6324d93202c2e210d81c1c2ae6117ab0:9640",
+      path = "/usr/lib/ui.lua",
+      text = "local ui = {}\
+\
+local function clamp(value, min, max)\
+    value = tonumber(value) or min\
+    if value < min then\
+        return min\
+    end\
+    if value > max then\
+        return max\
+    end\
+    return value\
+end\
+\
+local function dims(ctx)\
+    return ctx.width or 1, ctx.height or 1\
+end\
+\
+local function color(opts, name, fallback)\
+    return opts and opts[name] or fallback\
+end\
+\
+local font = {\
+    [\" \"] = { \"000\", \"000\", \"000\", \"000\", \"000\" },\
+    [\"0\"] = { \"111\", \"101\", \"101\", \"101\", \"111\" },\
+    [\"1\"] = { \"010\", \"110\", \"010\", \"010\", \"111\" },\
+    [\"2\"] = { \"111\", \"001\", \"111\", \"100\", \"111\" },\
+    [\"3\"] = { \"111\", \"001\", \"111\", \"001\", \"111\" },\
+    [\"4\"] = { \"101\", \"101\", \"111\", \"001\", \"001\" },\
+    [\"5\"] = { \"111\", \"100\", \"111\", \"001\", \"111\" },\
+    [\"6\"] = { \"111\", \"100\", \"111\", \"101\", \"111\" },\
+    [\"7\"] = { \"111\", \"001\", \"010\", \"010\", \"010\" },\
+    [\"8\"] = { \"111\", \"101\", \"111\", \"101\", \"111\" },\
+    [\"9\"] = { \"111\", \"101\", \"111\", \"001\", \"111\" },\
+    A = { \"111\", \"101\", \"111\", \"101\", \"101\" },\
+    B = { \"110\", \"101\", \"110\", \"101\", \"110\" },\
+    C = { \"111\", \"100\", \"100\", \"100\", \"111\" },\
+    D = { \"110\", \"101\", \"101\", \"101\", \"110\" },\
+    E = { \"111\", \"100\", \"110\", \"100\", \"111\" },\
+    F = { \"111\", \"100\", \"110\", \"100\", \"100\" },\
+    G = { \"111\", \"100\", \"101\", \"101\", \"111\" },\
+    H = { \"101\", \"101\", \"111\", \"101\", \"101\" },\
+    I = { \"111\", \"010\", \"010\", \"010\", \"111\" },\
+    J = { \"001\", \"001\", \"001\", \"101\", \"111\" },\
+    K = { \"101\", \"101\", \"110\", \"101\", \"101\" },\
+    L = { \"100\", \"100\", \"100\", \"100\", \"111\" },\
+    M = { \"101\", \"111\", \"111\", \"101\", \"101\" },\
+    N = { \"101\", \"111\", \"111\", \"111\", \"101\" },\
+    O = { \"111\", \"101\", \"101\", \"101\", \"111\" },\
+    P = { \"111\", \"101\", \"111\", \"100\", \"100\" },\
+    Q = { \"111\", \"101\", \"101\", \"111\", \"001\" },\
+    R = { \"110\", \"101\", \"110\", \"101\", \"101\" },\
+    S = { \"111\", \"100\", \"111\", \"001\", \"111\" },\
+    T = { \"111\", \"010\", \"010\", \"010\", \"010\" },\
+    U = { \"101\", \"101\", \"101\", \"101\", \"111\" },\
+    V = { \"101\", \"101\", \"101\", \"101\", \"010\" },\
+    W = { \"101\", \"101\", \"111\", \"111\", \"101\" },\
+    X = { \"101\", \"101\", \"010\", \"101\", \"101\" },\
+    Y = { \"101\", \"101\", \"010\", \"010\", \"010\" },\
+    Z = { \"111\", \"001\", \"010\", \"100\", \"111\" },\
+    [\".\"] = { \"000\", \"000\", \"000\", \"000\", \"010\" },\
+    [\",\"] = { \"000\", \"000\", \"000\", \"010\", \"100\" },\
+    [\":\"] = { \"000\", \"010\", \"000\", \"010\", \"000\" },\
+    [\";\"] = { \"000\", \"010\", \"000\", \"010\", \"100\" },\
+    [\"-\"] = { \"000\", \"000\", \"111\", \"000\", \"000\" },\
+    [\"_\"] = { \"000\", \"000\", \"000\", \"000\", \"111\" },\
+    [\"/\"] = { \"001\", \"001\", \"010\", \"100\", \"100\" },\
+    [\"+\"] = { \"000\", \"010\", \"111\", \"010\", \"000\" },\
+    [\"=\"] = { \"000\", \"111\", \"000\", \"111\", \"000\" },\
+    [\"!\"] = { \"010\", \"010\", \"010\", \"000\", \"010\" },\
+    [\"?\"] = { \"111\", \"001\", \"010\", \"000\", \"010\" },\
+    [\"$\"] = { \"011\", \"110\", \"111\", \"011\", \"110\" },\
+    [\"[\"] = { \"110\", \"100\", \"100\", \"100\", \"110\" },\
+    [\"]\"] = { \"011\", \"001\", \"001\", \"001\", \"011\" },\
+    [\"(\"] = { \"010\", \"100\", \"100\", \"100\", \"010\" },\
+    [\")\"] = { \"010\", \"001\", \"001\", \"001\", \"010\" },\
+    [\"{\"] = { \"011\", \"010\", \"110\", \"010\", \"011\" },\
+    [\"}\"] = { \"110\", \"010\", \"011\", \"010\", \"110\" },\
+    [\"<\"] = { \"001\", \"010\", \"100\", \"010\", \"001\" },\
+    [\">\"] = { \"100\", \"010\", \"001\", \"010\", \"100\" },\
+    [\"'\"] = { \"010\", \"010\", \"000\", \"000\", \"000\" },\
+    ['\"'] = { \"101\", \"101\", \"000\", \"000\", \"000\" },\
+    [\"*\"] = { \"101\", \"010\", \"111\", \"010\", \"101\" },\
+    [\"\\\\\"] = { \"100\", \"100\", \"010\", \"001\", \"001\" },\
+    [\"|\"] = { \"010\", \"010\", \"010\", \"010\", \"010\" },\
+    [\"#\"] = { \"101\", \"111\", \"101\", \"111\", \"101\" },\
+    [\"%\"] = { \"101\", \"001\", \"010\", \"100\", \"101\" },\
+    [\"&\"] = { \"010\", \"101\", \"010\", \"101\", \"011\" },\
+    [\"@\"] = { \"111\", \"101\", \"101\", \"100\", \"111\" },\
+    [\"`\"] = { \"100\", \"010\", \"000\", \"000\", \"000\" },\
+    [\"~\"] = { \"000\", \"010\", \"101\", \"000\", \"000\" },\
+    [\"^\"] = { \"010\", \"101\", \"000\", \"000\", \"000\" },\
+}\
+\
+local function glyphFor(ch)\
+    ch = string.upper(ch or \" \")\
+    return font[ch] or font[\"?\"]\
+end\
+\
+function ui.textWidth(text, opts)\
+    opts = opts or {}\
+    local scale = opts.scale or 1\
+    local spacing = opts.spacing or scale\
+    return #tostring(text or \"\") * (3 * scale + spacing)\
+end\
+\
+function ui.text(ctx, x, y, text, c, opts)\
+    opts = opts or {}\
+    text = tostring(text or \"\")\
+    local scale = opts.scale or 1\
+    local spacing = opts.spacing or scale\
+    local maxWidth = opts.maxWidth\
+    local cx = x\
+    for i = 1, #text do\
+        if maxWidth and cx + 3 * scale > x + maxWidth then\
+            break\
+        end\
+        local glyph = glyphFor(text:sub(i, i))\
+        for gy = 1, 5 do\
+            local row = glyph[gy]\
+            for gx = 1, 3 do\
+                if row:sub(gx, gx) == \"1\" then\
+                    ctx.surface:rect(cx + (gx - 1) * scale, y + (gy - 1) * scale, scale, scale, c or 11)\
+                end\
+            end\
+        end\
+        cx = cx + 3 * scale + spacing\
+    end\
+    return cx - x\
+end\
+\
+function ui.truncate(text, maxChars)\
+    text = tostring(text or \"\")\
+    maxChars = math.max(0, math.floor(tonumber(maxChars) or #text))\
+    if #text <= maxChars then\
+        return text\
+    end\
+    if maxChars <= 1 then\
+        return text:sub(1, maxChars)\
+    end\
+    return text:sub(1, maxChars - 1) .. \".\"\
+end\
+\
+function ui.textRow(ctx, x, y, w, h, text, opts)\
+    opts = opts or {}\
+    local s = ctx.surface\
+    if opts.bg then\
+        s:rect(x, y, w, h, opts.bg)\
+    end\
+    if opts.accent then\
+        s:rect(x, y, 3, h, opts.accent)\
+        x = x + 5\
+        w = w - 5\
+    end\
+    local maxChars = math.max(1, math.floor((w - 4) / 4))\
+    ui.text(ctx, x + 2, y + math.max(1, math.floor((h - 5) / 2)), ui.truncate(text, maxChars), opts.fg or 11, {\
+        scale = opts.scale or 1,\
+        maxWidth = w - 4,\
+    })\
+end\
+\
+function ui.clear(ctx, c)\
+    ctx.surface:clear(c or 1)\
+end\
+\
+function ui.panel(ctx, x, y, w, h, opts)\
+    local s = ctx.surface\
+    opts = opts or {}\
+    s:rect(x, y, w, h, color(opts, \"bg\", 2))\
+    if opts.border ~= false then\
+        s:frame(x, y, w, h, color(opts, \"border\", 3))\
+    end\
+end\
+\
+function ui.raised(ctx, x, y, w, h, opts)\
+    local s = ctx.surface\
+    opts = opts or {}\
+    s:rect(x, y, w, h, color(opts, \"bg\", 2))\
+    s:rect(x, y, w, 1, color(opts, \"light\", 11))\
+    s:rect(x, y, 1, h, color(opts, \"light\", 11))\
+    s:rect(x, y + h - 1, w, 1, color(opts, \"shadow\", 10))\
+    s:rect(x + w - 1, y, 1, h, color(opts, \"shadow\", 10))\
+end\
+\
+function ui.separator(ctx, x, y, w, opts)\
+    ctx.surface:rect(x, y, w, 1, color(opts, \"color\", 3))\
+end\
+\
+function ui.swatch(ctx, x, y, w, h, c, opts)\
+    opts = opts or {}\
+    ctx.surface:rect(x, y, w, h, c)\
+    if opts.border ~= false then\
+        ctx.surface:frame(x, y, w, h, color(opts, \"border\", 11))\
+    end\
+end\
+\
+function ui.bar(ctx, x, y, w, h, value, opts)\
+    opts = opts or {}\
+    value = clamp(value, 0, 1)\
+    ctx.surface:rect(x, y, w, h, color(opts, \"bg\", 2))\
+    ctx.surface:rect(x, y, math.floor(w * value), h, color(opts, \"fill\", 4))\
+    if opts.border ~= false then\
+        ctx.surface:frame(x, y, w, h, color(opts, \"border\", 3))\
+    end\
+end\
+\
+function ui.lines(ctx, x, y, widths, opts)\
+    opts = opts or {}\
+    local h = opts.height or 2\
+    local gap = opts.gap or 5\
+    local c = color(opts, \"color\", 11)\
+    for i, w in ipairs(widths or {}) do\
+        ctx.surface:rect(x, y + (i - 1) * gap, math.max(1, w), h, c)\
+    end\
+end\
+\
+function ui.list(ctx, x, y, w, count, opts)\
+    opts = opts or {}\
+    local rowH = opts.rowHeight or 7\
+    local gap = opts.gap or 2\
+    for i = 1, count do\
+        local yy = y + (i - 1) * (rowH + gap)\
+        ctx.surface:rect(x, yy, w, rowH, i == opts.selected and color(opts, \"selected\", 4) or color(opts, \"bg\", 2))\
+        ctx.surface:rect(x + 4, yy + 2, math.max(4, w - 8 - i * 3), 2, color(opts, \"line\", 11))\
+    end\
+end\
+\
+function ui.keyHints(ctx, hints, opts)\
+    opts = opts or {}\
+    local _, h = dims(ctx)\
+    local x = opts.x or 5\
+    local y = opts.y or math.max(0, h - 8)\
+    local gap = opts.gap or 4\
+    for _, hint in ipairs(hints or {}) do\
+        local w = hint.w or math.max(10, (#(hint.label or \"\") * 4) + 8)\
+        ctx.surface:rect(x, y, w, 5, color(opts, \"bg\", 3))\
+        ctx.surface:rect(x + 2, y + 2, math.max(3, w - 4), 1, hint.color or color(opts, \"fg\", 11))\
+        x = x + w + gap\
+    end\
+end\
+\
+function ui.demoLayout(ctx, opts)\
+    opts = opts or {}\
+    local w, h = dims(ctx)\
+    local accent = color(opts, \"accent\", 4)\
+    ui.clear(ctx, color(opts, \"bg\", 1))\
+\
+    local compact = w < 70 or h < 42\
+    if compact then\
+        ui.lines(ctx, 5, 5, {\
+            math.max(8, w - 12),\
+            math.max(8, w - 18),\
+            math.max(8, w - 28),\
+        }, { color = color(opts, \"line\", 11), gap = 7 })\
+        ui.bar(ctx, 5, math.max(5, h - 10), math.max(8, w - 10), 5, color(opts, \"value\", 0.65), {\
+            fill = accent,\
+            bg = 2,\
+            border = 3,\
+        })\
+        return\
+    end\
+\
+    local sideW = math.max(12, math.floor(w * 0.28))\
+    ui.lines(ctx, 5, 5, {\
+        math.max(10, math.floor(w * 0.70)),\
+        math.max(10, math.floor(w * 0.58)),\
+        math.max(10, math.floor(w * 0.46)),\
+        math.max(10, math.floor(w * 0.52)),\
+        math.max(10, math.floor(w * 0.40)),\
+    }, { color = color(opts, \"line\", 11), gap = 7 })\
+    ui.panel(ctx, w - sideW - 5, 5, sideW, math.max(8, h - 10), { bg = 2, border = 3 })\
+    ui.swatch(ctx, w - sideW - 2, 8, math.max(4, sideW - 6), 6, accent, { border = false })\
+    ui.bar(ctx, w - sideW - 2, 20, math.max(4, sideW - 12), 4, color(opts, \"value\", 0.55), {\
+        fill = 3,\
+        bg = 10,\
+        border = false,\
+    })\
+    ui.keyHints(ctx, {\
+        { label = \"space\", color = accent, w = 24 },\
+        { label = \"tab\", color = 5, w = 18 },\
+    })\
+end\
+\
+return ui\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-hywm",
+  version = "0.1.0",
+}

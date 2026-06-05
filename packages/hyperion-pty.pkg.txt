@@ -1,0 +1,496 @@
+return {
+  allowKernel = true,
+  depends = {
+  },
+  description = "PTY kernel module and Lua wrapper for graphical terminal apps.",
+  files = {
+    {
+      checksum = "sha256:044ea54bbbeeb53cee42c9d33dd9e8185cedce8b46086d2a82232fe4edb123dc:695",
+      mode = 954,
+      path = "/bin/ptydiag",
+      text = "local ok, pty = pcall(require, \"pty\")\
+if not ok then\
+    print(\"ptydiag: cannot load pty library: \" .. tostring(pty))\
+    syscall.exit(1)\
+end\
+\
+local opened, session = pcall(pty.open, 80, 24)\
+if not opened or not session then\
+    print(\"ptydiag: open failed: \" .. tostring(session))\
+    syscall.exit(1)\
+end\
+\
+print(\"pty id: \" .. tostring(session.id))\
+print(\"slave: \" .. tostring(session.path))\
+\
+local wrote = pcall(pty.write, session, \"ping\\n\")\
+print(\"write: \" .. tostring(wrote))\
+\
+local info = pty.info(session)\
+print(\"status: \" .. tostring(info and info.status))\
+print(\"cols: \" .. tostring(info and info.cols))\
+print(\"rows: \" .. tostring(info and info.rows))\
+\
+pty.close(session)\
+print(\"closed\")\
+",
+    },
+    {
+      checksum = "sha256:dc3f79764f3838ef7e6958281326a7c22a1018999004c15564699c62ebd92239:10911",
+      path = "/lib/modules/hyperion/54_pty.kmod",
+      text = "local k = ...\
+local sys = k.syscalls\
+\
+local pty = {\
+    nextId = 1,\
+    sessions = {},\
+}\
+k.pty = pty\
+\
+local function appendBuffer(buffer, data, limit)\
+    data = tostring(data or \"\")\
+    if data == \"\" then\
+        return\
+    end\
+    buffer[#buffer + 1] = data\
+    local total = 0\
+    for i = #buffer, 1, -1 do\
+        total = total + #buffer[i]\
+        if total > limit then\
+            for j = 1, i - 1 do\
+                buffer[j] = nil\
+            end\
+            local compact = {}\
+            for j = i, #buffer do\
+                compact[#compact + 1] = buffer[j]\
+            end\
+            for j = 1, #buffer do\
+                buffer[j] = nil\
+            end\
+            for j = 1, #compact do\
+                buffer[j] = compact[j]\
+            end\
+            return\
+        end\
+    end\
+end\
+\
+local function readBuffer(buffer, max)\
+    max = tonumber(max) or 4096\
+    if max <= 0 or #buffer == 0 then\
+        return \"\"\
+    end\
+    local out = {}\
+    local remaining = max\
+    while remaining > 0 and #buffer > 0 do\
+        local chunk = buffer[1]\
+        if #chunk <= remaining then\
+            out[#out + 1] = chunk\
+            remaining = remaining - #chunk\
+            table.remove(buffer, 1)\
+        else\
+            out[#out + 1] = chunk:sub(1, remaining)\
+            buffer[1] = chunk:sub(remaining + 1)\
+            remaining = 0\
+        end\
+    end\
+    return table.concat(out)\
+end\
+\
+local function getSession(id)\
+    id = tonumber(id)\
+    local session = id and pty.sessions[id]\
+    if not session then\
+        error(\"ENOENT: pty not found\")\
+    end\
+    return session\
+end\
+\
+local function clampCursor(session)\
+    session.cursorX = math.max(1, math.min(tonumber(session.cursorX) or 1, tonumber(session.cols) or 80))\
+    session.cursorY = math.max(1, math.min(tonumber(session.cursorY) or 1, tonumber(session.rows) or 24))\
+end\
+\
+local function scrollCursor(session)\
+    if session.cursorY > session.rows then\
+        session.cursorY = session.rows\
+    end\
+end\
+\
+local function advanceCursor(session)\
+    session.cursorX = session.cursorX + 1\
+    if session.cursorX > session.cols then\
+        session.cursorX = 1\
+        session.cursorY = session.cursorY + 1\
+        scrollCursor(session)\
+    end\
+end\
+\
+local function parseParams(text)\
+    local params = {}\
+    text = tostring(text or \"\")\
+    if text == \"\" then\
+        return params\
+    end\
+    for item in (text .. \";\"):gmatch(\"([^;]*);\") do\
+        params[#params + 1] = item == \"\" and 0 or (tonumber(item) or 0)\
+    end\
+    return params\
+end\
+\
+local function trackCsi(session, paramsText, final)\
+    local params = parseParams(paramsText)\
+    if final == \"C\" then\
+        session.cursorX = session.cursorX + math.max(1, params[1] or 1)\
+    elseif final == \"D\" then\
+        session.cursorX = session.cursorX - math.max(1, params[1] or 1)\
+    elseif final == \"A\" then\
+        session.cursorY = session.cursorY - math.max(1, params[1] or 1)\
+    elseif final == \"B\" then\
+        session.cursorY = session.cursorY + math.max(1, params[1] or 1)\
+    elseif final == \"G\" then\
+        session.cursorX = params[1] or 1\
+    elseif final == \"H\" or final == \"f\" then\
+        session.cursorY = params[1] or 1\
+        session.cursorX = params[2] or 1\
+    elseif final == \"J\" and (params[1] or 0) == 2 then\
+        session.cursorX = 1\
+        session.cursorY = 1\
+    end\
+    clampCursor(session)\
+end\
+\
+local function trackOutput(session, data)\
+    data = tostring(data or \"\")\
+    local i = 1\
+    while i <= #data do\
+        local ch = data:sub(i, i)\
+        if ch == \"\\n\" then\
+            session.cursorX = 1\
+            session.cursorY = session.cursorY + 1\
+            scrollCursor(session)\
+        elseif ch == \"\\r\" then\
+            session.cursorX = 1\
+        elseif ch == \"\\b\" or ch == \"\\127\" then\
+            session.cursorX = math.max(1, session.cursorX - 1)\
+        elseif ch == \"\\12\" then\
+            session.cursorX = 1\
+            session.cursorY = 1\
+        elseif ch == \"\\27\" and data:sub(i + 1, i + 1) == \"[\" then\
+            local j = i + 2\
+            while j <= #data do\
+                local code = data:byte(j)\
+                if code and code >= 0x40 and code <= 0x7E then\
+                    trackCsi(session, data:sub(i + 2, j - 1), data:sub(j, j))\
+                    i = j\
+                    break\
+                end\
+                j = j + 1\
+            end\
+        else\
+            local code = ch:byte(1)\
+            if code and code >= 32 and code <= 126 then\
+                advanceCursor(session)\
+            end\
+        end\
+        i = i + 1\
+    end\
+    clampCursor(session)\
+end\
+\
+local function rgb(color)\
+    color = math.floor(tonumber(color) or 0)\
+    return math.floor(color / 0x10000) % 0x100, math.floor(color / 0x100) % 0x100, color % 0x100\
+end\
+\
+local function sgr(kind, color)\
+    local r, g, b = rgb(color)\
+    return string.format(\"\\27[%d;2;%d;%d;%dm\", kind, r, g, b)\
+end\
+\
+local function output(session, data, track)\
+    appendBuffer(session.output, data, session.limit)\
+    if track ~= false then\
+        trackOutput(session, data)\
+    end\
+end\
+\
+local function makeSlaveDevice(id)\
+    return function(op, mode)\
+        local session = getSession(id)\
+        if op == \"type\" then\
+            return \"character device\"\
+        end\
+        if op ~= \"open\" then\
+            error(\"EINVAL\")\
+        end\
+        mode = mode or \"rw\"\
+        local handle = {\
+            read = function(max)\
+                return readBuffer(session.input, max or 1)\
+            end,\
+            write = function(data)\
+                output(session, data)\
+                return true\
+            end,\
+            close = function()\
+                return true\
+            end,\
+            size = function()\
+                return tostring(session.cols) .. \";\" .. tostring(session.rows)\
+            end,\
+            clear = function()\
+                output(session, \"\\27[2J\\27[H\", false)\
+                session.cursorX = 1\
+                session.cursorY = 1\
+                return true\
+            end,\
+            clearline = function()\
+                output(session, \"\\27[2K\\r\", false)\
+                session.cursorX = 1\
+                return true\
+            end,\
+            cline = function()\
+                output(session, \"\\27[2K\\r\", false)\
+                session.cursorX = 1\
+                return true\
+            end,\
+            el = function()\
+                output(session, \"\\27[K\", false)\
+                return true\
+            end,\
+            gpos = function()\
+                return tostring(session.cursorX) .. \";\" .. tostring(session.cursorY)\
+            end,\
+            spos = function(x, y)\
+                session.cursorX = tonumber(x) or session.cursorX\
+                session.cursorY = tonumber(y) or session.cursorY\
+                clampCursor(session)\
+                output(session, string.format(\"\\27[%d;%dH\", session.cursorY, session.cursorX), false)\
+                return true\
+            end,\
+            sfgc = function(color)\
+                session.fg = color\
+                output(session, sgr(38, color), false)\
+                return true\
+            end,\
+            sbgc = function(color)\
+                session.bg = color\
+                output(session, sgr(48, color), false)\
+                return true\
+            end,\
+            gfgc = function()\
+                return session.fg\
+            end,\
+            gbgc = function()\
+                return session.bg\
+            end,\
+            gctrl = function()\
+                return \"F;F\"\
+            end,\
+        }\
+        if mode == \"r\" then\
+            handle.write = nil\
+        elseif mode == \"w\" or mode == \"a\" then\
+            handle.read = nil\
+        elseif mode ~= \"rw\" then\
+            error(\"EACCES\")\
+        end\
+        return handle\
+    end\
+end\
+\
+local function copyEnv(env)\
+    local out = {}\
+    if type(env) == \"table\" then\
+        for key, value in pairs(env) do\
+            out[key] = value\
+        end\
+    end\
+    return out\
+end\
+\
+local function create()\
+    local id = pty.nextId\
+    pty.nextId = id + 1\
+    local session = {\
+        id = id,\
+        input = {},\
+        output = {},\
+        limit = 65536,\
+        cols = 80,\
+        rows = 24,\
+        cursorX = 1,\
+        cursorY = 1,\
+        fg = 0xFFFFFF,\
+        bg = 0x000000,\
+        pid = nil,\
+        closed = false,\
+    }\
+    pty.sessions[id] = session\
+    k.devfs.data.pts = k.devfs.data.pts or {}\
+    k.devfs.data.pts[tostring(id)] = makeSlaveDevice(id)\
+    return session\
+end\
+\
+local function closeSession(id)\
+    local session = getSession(id)\
+    if session.pid then\
+        pcall(sys.kill, session.pid)\
+    end\
+    pty.sessions[session.id] = nil\
+    if k.devfs.data.pts then\
+        k.devfs.data.pts[tostring(session.id)] = nil\
+    end\
+    session.closed = true\
+    return true\
+end\
+\
+sys[\"pty_open\"] = function(cols, rows)\
+    local session = create()\
+    session.cols = tonumber(cols) or session.cols\
+    session.rows = tonumber(rows) or session.rows\
+    return session.id, \"/dev/pts/\" .. tostring(session.id)\
+end\
+\
+sys[\"pty_close\"] = function(id)\
+    return closeSession(id)\
+end\
+\
+sys[\"pty_read\"] = function(id, max)\
+    local session = getSession(id)\
+    return readBuffer(session.output, max or 4096)\
+end\
+\
+sys[\"pty_write\"] = function(id, data)\
+    local session = getSession(id)\
+    appendBuffer(session.input, data, session.limit)\
+    return true\
+end\
+\
+sys[\"pty_info\"] = function(id)\
+    local session = getSession(id)\
+    local task = session.pid and k.tasks[tostring(session.pid)] or nil\
+    return {\
+        id = session.id,\
+        path = \"/dev/pts/\" .. tostring(session.id),\
+        pid = session.pid,\
+        status = task and task.status or nil,\
+        exit = task and task.exit or nil,\
+        output = #session.output,\
+        input = #session.input,\
+        cols = session.cols,\
+        rows = session.rows,\
+    }\
+end\
+\
+sys[\"pty_spawn\"] = function(id, path, args, env)\
+    local session = getSession(id)\
+    path = tostring(path or \"\")\
+    if path == \"\" then\
+        error(\"EINVAL: missing executable path\")\
+    end\
+    args = type(args) == \"table\" and args or {}\
+    local slave = \"/dev/pts/\" .. tostring(session.id)\
+    env = copyEnv(type(env) == \"table\" and env or (k.currentTask and k.currentTask.envars or {}))\
+    env.TTY = slave\
+    env.TERM = env.TERM or \"hyperion-gfx\"\
+    local pid = k.hpv.spawn(function()\
+        k.vfs.open(slave, \"rw\")\
+        k.vfs.open(slave, \"w\")\
+        k.vfs.open(slave, \"w\")\
+        k.hpv.exec(path, args, env)\
+    end, path:match(\"([^/]+)$\") or path, env, args)\
+    session.pid = pid\
+    return pid\
+end\
+\
+sys[\"pty_collect\"] = function(id)\
+    local session = getSession(id)\
+    if not session.pid then\
+        return false, \"no child\"\
+    end\
+    return sys.collect(session.pid)\
+end\
+\
+sys[\"pty_kill\"] = function(id)\
+    local session = getSession(id)\
+    if not session.pid then\
+        return false, \"no child\"\
+    end\
+    return sys.kill(session.pid)\
+end\
+\
+k.log(\"PTY module loaded\", \"INFO\", 0x00FFFF)\
+",
+    },
+    {
+      checksum = "sha256:d2a92e371a8b16b2dab10ce4a59107d8e33a1ac7beeb5d5da94c8c4dc194f2f9:1311",
+      path = "/usr/lib/pty.lua",
+      text = "local pty = {}\
+\
+function pty.open(cols, rows)\
+    local id, path = syscall.pty_open(cols, rows)\
+    return {\
+        id = id,\
+        path = path,\
+    }\
+end\
+\
+function pty.close(session)\
+    if session and session.id then\
+        return syscall.pty_close(session.id)\
+    end\
+end\
+\
+function pty.read(session, max)\
+    if not session or not session.id then\
+        return \"\"\
+    end\
+    return syscall.pty_read(session.id, max or 4096)\
+end\
+\
+function pty.write(session, data)\
+    if not session or not session.id then\
+        return false\
+    end\
+    return syscall.pty_write(session.id, data)\
+end\
+\
+function pty.spawn(session, path, args, env)\
+    if not session or not session.id then\
+        error(\"pty: invalid session\", 2)\
+    end\
+    session.pid = syscall.pty_spawn(session.id, path, args or {}, env)\
+    return session.pid\
+end\
+\
+function pty.info(session)\
+    if not session or not session.id then\
+        return nil\
+    end\
+    return syscall.pty_info(session.id)\
+end\
+\
+function pty.collect(session)\
+    if not session or not session.id then\
+        return false, \"invalid session\"\
+    end\
+    return syscall.pty_collect(session.id)\
+end\
+\
+function pty.kill(session)\
+    if not session or not session.id then\
+        return false, \"invalid session\"\
+    end\
+    return syscall.pty_kill(session.id)\
+end\
+\
+return pty\
+",
+    },
+  },
+  format = 1,
+  name = "hyperion-pty",
+  version = "0.1.0",
+}
